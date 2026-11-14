@@ -61,6 +61,25 @@ const btnCancelScanner = document.getElementById('btn-cancel-scanner');
 const DANGEROUS_EXTS = /\.(exe|bat|cmd|sh|js|mjs|cjs|vbs|ps1|scr|msi|jar|apk|com|pif|hta|html|htm|php|cgi)$/i;
 
 /**
+ * Fetch public config and instantiate Supabase client
+ */
+async function getSupabaseClient() {
+  if (supabaseClient) return supabaseClient;
+  try {
+    const res = await fetch('/api/config');
+    if (!res.ok) return null;
+    const config = await res.json();
+    if (config.supabaseUrl && config.supabaseAnonKey) {
+      supabaseClient = createClient(config.supabaseUrl, config.supabaseAnonKey);
+      return supabaseClient;
+    }
+  } catch (e) {
+    console.warn('Failed to load Supabase client config:', e);
+  }
+  return null;
+}
+
+/**
  * Resilient Upload Handler: Tries direct Supabase storage upload;
  * if RLS policy blocks it, falls back to server-side relay using service role.
  */
