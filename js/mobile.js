@@ -1,5 +1,9 @@
 import { upload } from '/js/vendor/blob-client.js';
 
+// Session storage keys
+const MOBILE_CODE_KEY = 'kiosk_mobile_code';
+const MOBILE_JOB_KEY = 'kiosk_mobile_job';
+
 // State variables
 let currentCode = null;
 let currentJobId = null;
@@ -57,6 +61,16 @@ const btnCancelScanner = document.getElementById('btn-cancel-scanner');
 const DANGEROUS_EXTS = /\.(exe|bat|cmd|sh|js|mjs|cjs|vbs|ps1|scr|msi|jar|apk|com|pif|hta|html|htm|php|cgi)$/i;
 
 /**
+ * XSS-safe text escaping
+ */
+function escapeHtml(str) {
+  if (!str) return '';
+  const div = document.createElement('div');
+  div.textContent = String(str);
+  return div.innerHTML;
+}
+
+/**
  * Format bytes into readable string.
  */
 function formatBytes(bytes) {
@@ -93,7 +107,7 @@ function validateFiles(fileList) {
 }
 
 /**
- * Render staged files in attachment list.
+ * In-place rendering of staged files in attachment list.
  */
 function renderStagedList(container, listEl, countEl, filesArray, onRemove) {
   if (filesArray.length === 0) {
@@ -108,15 +122,16 @@ function renderStagedList(container, listEl, countEl, filesArray, onRemove) {
   listEl.innerHTML = '';
 
   filesArray.forEach((file, idx) => {
+    const safeName = escapeHtml(file.name);
     const item = document.createElement('div');
     item.className = 'mobile-attachment-item';
     item.innerHTML = `
       <div class="mobile-item-left">
         <span aria-hidden="true">📄</span>
-        <span class="mobile-file-name" title="${file.name}">${file.name}</span>
+        <span class="mobile-file-name" title="${safeName}">${safeName}</span>
         <span class="mobile-file-size">(${formatBytes(file.size)})</span>
       </div>
-      <button class="btn-remove-attachment" data-index="${idx}" type="button" aria-label="Remove ${file.name}">✕</button>
+      <button class="btn-remove-attachment" data-index="${idx}" type="button" aria-label="Remove ${safeName}">✕</button>
     `;
     listEl.appendChild(item);
   });
@@ -131,15 +146,22 @@ function renderStagedList(container, listEl, countEl, filesArray, onRemove) {
 }
 
 /**
- * Parse URL parameters and select the appropriate flow.
+ * Parse URL or stored session and launch flow.
  */
 function init() {
   const urlParams = new URLSearchParams(window.location.search);
-  const code = urlParams.get('code');
+  let code = urlParams.get('code');
   const action = urlParams.get('action');
 
+  // Check stored code if not in URL
+  if (!code) {
+    code = sessionStorage.getItem(MOBILE_CODE_KEY);
+  } else {
+    sessionStorage.setItem(MOBILE_CODE_KEY, code.trim());
+  }
+
   if (action === 'download' && code) {
-    initDownloadFlow(code);
+    initDownloadFlow(code.trim());
   } else if (code && /^\d{4}$/.test(code.trim())) {
     initStandardFlow(code.trim());
   } else {
@@ -252,6 +274,17 @@ function initStandardFlow(code) {
  */
 function initPreuploadFlow() {
   cardPreupload.classList.add('active');
+
+  // Check stored jobId across refresh
+  const storedJob = sessionStorage.getItem(MOBILE_JOB_KEY);
+  if (storedJob) {
+    currentJobId = storedJob;
+    preuploadStepFile.style.display = 'none';
+    btnPreuploadFile.style.display = 'none';
+    preuploadStepBind.style.display = 'flex';
+    btnBindCode.style.display = 'flex';
+  }
+
   dropzonePreupload.addEventListener('click', () => fileInputPreupload.click());
 
   fileInputPreupload.addEventListener('change', (e) => {
@@ -286,6 +319,7 @@ function initPreuploadFlow() {
     progressPreupload.style.display = 'block';
     progressFillPreupload.style.width = '10%';
     currentJobId = 'job_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+    sessionStorage.setItem(MOBILE_JOB_KEY, currentJobId);
 
     const uploaded = [];
 
@@ -344,7 +378,6 @@ function initPreuploadFlow() {
     }
   });
 
-  // Manual 4-digit numeric code input
   manualCodeInput.addEventListener('input', (e) => {
     e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4);
     btnBindCode.disabled = e.target.value.length !== 4;
@@ -358,7 +391,6 @@ function initPreuploadFlow() {
     if (code.length === 4) bindJobToKiosk(code);
   });
 
-  // Camera QR Code Scanner
   btnScanQr.addEventListener('click', startCameraScanner);
   btnCancelScanner.addEventListener('click', stopCameraScanner);
 }
@@ -392,7 +424,7 @@ async function startCameraScanner() {
             bindJobToKiosk(extractedCode);
           }
         },
-        () => {} // frame scan ignore
+        () => {}
       );
     } catch (err) {
       console.error('Camera scanner error:', err);
@@ -439,6 +471,7 @@ async function bindJobToKiosk(code) {
       throw new Error(err.error || `Failed to link: HTTP ${res.status}`);
     }
 
+    sessionStorage.removeItem(MOBILE_JOB_KEY);
     cardPreupload.classList.remove('active');
     cardSuccess.classList.add('active');
   } catch (err) {
@@ -446,6 +479,26 @@ async function bindJobToKiosk(code) {
     alert(`Could not link to kiosk: ${err.message}`);
     btnBindCode.disabled = false;
     btnBindCode.textContent = 'Link to Kiosk Screen';
+  }
+}
+
+/**
+ * Helper to download cross-origin blob URL natively.
+ */
+async function downloadBlobDirectly(url, filename) {
+  try {
+    const res = await fetch(url);
+    const blob = await res.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objUrl;
+    a.download = filename || 'document';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+  } catch (e) {
+    window.open(url, '_blank');
   }
 }
 
@@ -476,44 +529,69 @@ async function initDownloadFlow(code) {
     }
 
     files.forEach((file) => {
+      const safeName = escapeHtml(file.name);
       const row = document.createElement('div');
       row.className = 'mobile-attachment-item';
       row.innerHTML = `
         <div class="mobile-item-left">
           <span aria-hidden="true">📥</span>
-          <span class="mobile-file-name">${file.name}</span>
+          <span class="mobile-file-name">${safeName}</span>
           <span class="mobile-file-size">(${formatBytes(file.size)})</span>
         </div>
-        <a href="${file.url}" download="${file.name}" target="_blank" class="btn-remove-attachment" style="text-decoration:none; color:var(--accent-blue); font-size:0.8rem; font-weight:700;">Save</a>
+        <button class="btn-remove-attachment btn-save-mobile" data-url="${file.url}" data-name="${safeName}" type="button" style="color:var(--accent-blue); font-size:0.8rem; font-weight:700;">Save</button>
       `;
       downloadFilesList.appendChild(row);
+    });
+
+    downloadFilesList.querySelectorAll('.btn-save-mobile').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        downloadBlobDirectly(btn.getAttribute('data-url'), btn.getAttribute('data-name'));
+      });
     });
 
     btnDownloadAllMobile.addEventListener('click', () => {
       files.forEach((file, i) => {
         setTimeout(() => {
-          const a = document.createElement('a');
-          a.href = file.url;
-          a.download = file.name || 'document';
-          a.target = '_blank';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
+          downloadBlobDirectly(file.url, file.name);
         }, i * 350);
       });
     });
   } catch (err) {
     console.error('Error fetching files for download:', err);
-    downloadFilesList.innerHTML = `<div style="padding:12px; color:#e11d48; text-align:center;">${err.message}</div>`;
+    downloadFilesList.innerHTML = `<div style="padding:12px; color:#e11d48; text-align:center;">${escapeHtml(err.message)}</div>`;
     btnDownloadAllMobile.style.display = 'none';
   }
 }
 
 /**
- * Reset companion flow
+ * In-place reset (NO page reload)
  */
 btnSendAnother.addEventListener('click', () => {
-  window.location.href = currentCode ? `/mobile.html?code=${currentCode}` : '/mobile.html';
+  cardSuccess.classList.remove('active');
+  stagedFilesStandard = [];
+  stagedFilesPreupload = [];
+  progressStandard.style.display = 'none';
+  progressPreupload.style.display = 'none';
+  fileInputStandard.value = '';
+  fileInputPreupload.value = '';
+  attachmentContainerStandard.style.display = 'none';
+  attachmentContainerPreupload.style.display = 'none';
+  attachmentListStandard.innerHTML = '';
+  attachmentListPreupload.innerHTML = '';
+
+  if (currentCode) {
+    btnSendStandard.disabled = true;
+    btnSendStandard.textContent = '📤 Send to Kiosk';
+    cardStandard.classList.add('active');
+  } else {
+    preuploadStepFile.style.display = 'flex';
+    btnPreuploadFile.style.display = 'flex';
+    preuploadStepBind.style.display = 'none';
+    btnBindCode.style.display = 'none';
+    btnPreuploadFile.disabled = true;
+    cardPreupload.classList.add('active');
+  }
 });
 
 // Run

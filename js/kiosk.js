@@ -1,5 +1,9 @@
 import { upload } from '/js/vendor/blob-client.js';
 
+// Constants
+const SESSION_STORAGE_KEY = 'kiosk_station_session_v2';
+const TOTAL_IDLE_SECONDS = 180; // 3 minutes
+
 // Global state
 let currentCode = null;
 let currentFiles = [];
@@ -7,7 +11,7 @@ let currentState = 'idle'; // 'idle' | 'received' | 'sending'
 let pollInterval = null;
 let pingInterval = null;
 let idleTimer = null;
-let idleTimeRemaining = 180; // 3 minutes as requested
+let idleTimeRemaining = TOTAL_IDLE_SECONDS;
 let consecutive404Count = 0;
 let isOffline = false;
 
@@ -52,6 +56,51 @@ const timeoutWarningBanner = document.getElementById('timeout-warning-banner');
 const printIframe = document.getElementById('print-iframe');
 
 /**
+ * Persist active session to survive page reloads.
+ */
+function getStoredSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    const now = Date.now();
+    if (now >= data.expiresAt) {
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+      return null;
+    }
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveStoredSession(code, remainingSec = TOTAL_IDLE_SECONDS) {
+  try {
+    const data = {
+      code,
+      expiresAt: Date.now() + (remainingSec * 1000),
+    };
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(data));
+  } catch (e) {}
+}
+
+function clearStoredSession() {
+  try {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch (e) {}
+}
+
+/**
+ * XSS-safe text escaping
+ */
+function escapeHtml(str) {
+  if (!str) return '';
+  const div = document.createElement('div');
+  div.textContent = String(str);
+  return div.innerHTML;
+}
+
+/**
  * Format bytes into human-readable string.
  */
 function formatBytes(bytes) {
@@ -76,7 +125,7 @@ function getFileTypeInfo(filename = '') {
 }
 
 /**
- * Update the header status indicator.
+ * Update the header status indicator without re-rendering header.
  */
 function setHeaderStatus(type, text) {
   if (!statusDot || !statusLabel) return;
@@ -85,7 +134,7 @@ function setHeaderStatus(type, text) {
 }
 
 /**
- * Switch view state.
+ * Switch view state with smooth in-place CSS animations.
  */
 function setViewState(state) {
   currentState = state;
@@ -129,15 +178,54 @@ function renderQrCode(canvas, text) {
       console.error('Failed to draw QR code:', e);
     }
   } else {
-    console.warn('QRCode library not ready yet, retrying in 200ms...');
     setTimeout(() => renderQrCode(canvas, text), 200);
   }
 }
 
 /**
- * Initialize a new session from the server.
+ * Initialize or restore a session across page reloads.
  */
-async function initSession() {
+async function initSession(forceNew = false) {
+  if (!forceNew) {
+    const stored = getStoredSession();
+    if (stored && stored.code) {
+      currentCode = stored.code;
+      const remaining = Math.max(10, Math.round((stored.expiresAt - Date.now()) / 1000));
+      idleTimeRemaining = remaining;
+      displayCode.textContent = currentCode;
+
+      const mobileUrl = `${window.location.origin}/mobile.html?code=${currentCode}`;
+      renderQrCode(qrCanvasReceive, mobileUrl);
+
+      // Verify status with server smoothly
+      try {
+        const res = await fetch(`/api/status?code=${currentCode}&t=${Date.now()}`);
+        if (res.ok) {
+          const data = await res.json();
+          const files = Array.isArray(data.files) && data.files.length > 0
+            ? data.files
+            : data.file ? [data.file] : [];
+
+          if (data.status === 'uploaded' && files.length > 0) {
+            currentFiles = files;
+            onFilesReceived(files);
+            startPolling();
+            return;
+          }
+          setViewState('idle');
+          startPolling();
+          return;
+        }
+      } catch (e) {
+        // network issue, continue with stored code
+        setViewState('idle');
+        startPolling();
+        return;
+      }
+    }
+  }
+
+  // Generate brand new session
   try {
     setHeaderStatus('warning', 'Connecting...');
     const res = await fetch('/api/session', {
@@ -154,9 +242,11 @@ async function initSession() {
     currentCode = data.code;
     consecutive404Count = 0;
     currentFiles = [];
+    idleTimeRemaining = TOTAL_IDLE_SECONDS;
+    saveStoredSession(currentCode, idleTimeRemaining);
+
     displayCode.textContent = currentCode;
 
-    // Mobile URL pointing directly to the companion page with pre-bound code
     const mobileUrl = `${window.location.origin}/mobile.html?code=${currentCode}`;
     renderQrCode(qrCanvasReceive, mobileUrl);
 
@@ -166,14 +256,12 @@ async function initSession() {
     console.error('Failed to init session:', err);
     setHeaderStatus('error', 'Error');
     showNetworkBanner('⚠️ Failed to generate session. Checking connection...');
-    setTimeout(initSession, 4000);
+    setTimeout(() => initSession(true), 4000);
   }
 }
 
 /**
- * Polling loop to check for incoming uploads.
- * Only resets on 180s timeout, print/download completion, or manual trigger.
- * Temporary 404s are NOT allowed to destroy the session.
+ * Polling loop to check for incoming uploads smoothly in-place.
  */
 function startPolling() {
   stopPolling();
@@ -186,10 +274,9 @@ function startPolling() {
       if (!res.ok) {
         if (res.status === 404) {
           consecutive404Count++;
-          // Only re-init if 404 persists continuously for > 40 seconds (20 polls)
-          if (consecutive404Count > 20) {
+          if (consecutive404Count > 25) {
             console.warn('Persistent 404. Re-initializing session...');
-            initSession();
+            initSession(true);
           }
           return;
         }
@@ -229,7 +316,7 @@ function stopPolling() {
 }
 
 /**
- * Render received files (Reference Image 2 layout).
+ * In-place non-refresh DOM update when files arrive.
  */
 function onFilesReceived(files) {
   receivedCountChip.textContent = `${files.length} ${files.length === 1 ? 'file' : 'files'}`;
@@ -244,12 +331,13 @@ function onFilesReceived(files) {
 
     const isImage = fileInfo.type === 'img';
     const isPrintable = isImage || fileInfo.type === 'pdf';
+    const safeName = escapeHtml(file.name);
 
     item.innerHTML = `
       <div class="attachment-left">
-        <div class="file-type-icon ${fileInfo.type}">${fileInfo.label}</div>
+        <div class="file-type-icon ${fileInfo.type}">${escapeHtml(fileInfo.label)}</div>
         <div class="attachment-name-meta">
-          <span class="attachment-name" title="${file.name}">${file.name}</span>
+          <span class="attachment-name" title="${safeName}">${safeName}</span>
           <span class="attachment-size">${formatBytes(file.size)}</span>
         </div>
       </div>
@@ -261,22 +349,25 @@ function onFilesReceived(files) {
 
     receivedFilesList.appendChild(item);
 
-    // If image, add to thumbnail strip
     if (isImage && file.url) {
       hasImages = true;
       const thumb = document.createElement('div');
       thumb.className = 'thumbnail-card';
-      thumb.innerHTML = `
-        <img src="${file.url}" alt="${file.name}" loading="lazy">
-        <span class="thumbnail-badge">${formatBytes(file.size)}</span>
-      `;
+      const img = document.createElement('img');
+      img.src = file.url;
+      img.alt = file.name;
+      img.loading = 'lazy';
+      const badge = document.createElement('span');
+      badge.className = 'thumbnail-badge';
+      badge.textContent = formatBytes(file.size);
+      thumb.appendChild(img);
+      thumb.appendChild(badge);
       receivedThumbnailStrip.appendChild(thumb);
     }
   });
 
   receivedThumbnailStrip.style.display = hasImages ? 'flex' : 'none';
 
-  // Attach individual button listeners
   receivedFilesList.querySelectorAll('.btn-print-single').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -323,28 +414,36 @@ function printFile(file) {
 }
 
 /**
- * Download a single file.
+ * Download a single file natively via ObjectURL.
  */
-function downloadFile(file) {
+async function downloadFile(file) {
   if (!file || !file.url) return;
   resetIdleTimer();
-  const a = document.createElement('a');
-  a.href = file.url;
-  a.download = file.name || 'download';
-  a.target = '_blank';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+
+  try {
+    const res = await fetch(file.url);
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = file.name || 'document';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  } catch (e) {
+    window.open(file.url, '_blank');
+  }
 }
 
 /**
- * Print All Files.
+ * Print All Files sequentially.
  */
 btnPrintAll.addEventListener('click', () => {
   if (!currentFiles || currentFiles.length === 0) return;
   resetIdleTimer();
   currentFiles.forEach((file, i) => {
-    setTimeout(() => printFile(file), i * 800);
+    setTimeout(() => printFile(file), i * 900);
   });
 });
 
@@ -355,28 +454,37 @@ btnDownloadAll.addEventListener('click', () => {
   if (!currentFiles || currentFiles.length === 0) return;
   resetIdleTimer();
   currentFiles.forEach((file, i) => {
-    setTimeout(() => downloadFile(file), i * 300);
+    setTimeout(() => downloadFile(file), i * 400);
   });
 });
 
 /**
- * Reset / Finish session and purge files from Blob.
+ * Reset / Finish session in-place without page reload.
  */
 async function resetSession() {
   stopIdleTimer();
   stopPolling();
 
-  if (currentCode) {
+  const oldCode = currentCode;
+  clearStoredSession();
+  currentFiles = [];
+  currentCode = null;
+
+  // Clear in-place DOM
+  receivedFilesList.innerHTML = '';
+  receivedThumbnailStrip.innerHTML = '';
+  receivedThumbnailStrip.style.display = 'none';
+
+  if (oldCode) {
     try {
-      await fetch(`/api/cleanup?code=${currentCode}`, { method: 'DELETE' });
+      await fetch(`/api/cleanup?code=${oldCode}`, { method: 'DELETE' });
     } catch (e) {
       console.warn('Error during blob cleanup:', e);
     }
   }
 
-  currentFiles = [];
-  currentCode = null;
-  initSession();
+  // Smoothly initialize new session in-place
+  initSession(true);
 }
 
 btnResetReceived.addEventListener('click', resetSession);
@@ -399,7 +507,7 @@ btnBackToReceive.addEventListener('click', () => {
   setViewState(currentFiles.length > 0 ? 'received' : 'idle');
 });
 
-// Keyboard shortcuts (Shift+1, Shift+2, or 1/2)
+// Keyboard shortcuts (1: Receive, 2: Send)
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   if (e.key === '1') tabReceive.click();
@@ -423,7 +531,11 @@ desktopFileInput.addEventListener('change', (e) => {
 async function handleDesktopFilesUpload(files) {
   if (!files || files.length === 0) return;
 
-  // Validation: Max 50MB per file
+  if (files.length > 10) {
+    alert('Please select a maximum of 10 files at once.');
+    return;
+  }
+
   for (const f of files) {
     if (f.size > 50 * 1024 * 1024) {
       alert(`File "${f.name}" exceeds the 50MB limit (${formatBytes(f.size)}). Please choose smaller files.`);
@@ -457,7 +569,6 @@ async function handleDesktopFilesUpload(files) {
       });
     }
 
-    // Complete batch
     await fetch('/api/upload-complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -468,7 +579,6 @@ async function handleDesktopFilesUpload(files) {
       }),
     });
 
-    // Show outbound QR code
     desktopDropzone.style.display = 'none';
     outboundQrContainer.style.display = 'block';
     outboundCountChip.textContent = `${uploadedFiles.length} files`;
@@ -480,9 +590,9 @@ async function handleDesktopFilesUpload(files) {
       row.className = 'attachment-item';
       row.innerHTML = `
         <div class="attachment-left">
-          <div class="file-type-icon ${info.type}">${info.label}</div>
+          <div class="file-type-icon ${info.type}">${escapeHtml(info.label)}</div>
           <div class="attachment-name-meta">
-            <span class="attachment-name">${f.name}</span>
+            <span class="attachment-name">${escapeHtml(f.name)}</span>
             <span class="attachment-size">${formatBytes(f.size)}</span>
           </div>
         </div>
@@ -497,13 +607,13 @@ async function handleDesktopFilesUpload(files) {
     startIdleTimer();
   } catch (err) {
     console.error('Desktop upload failed:', err);
-    desktopDropzone.innerHTML = `<div class="dropzone-title" style="color: #e11d48;">❌ Upload failed: ${err.message}. Click to retry.</div>`;
+    desktopDropzone.innerHTML = `<div class="dropzone-title" style="color: #e11d48;">❌ Upload failed: ${escapeHtml(err.message)}. Click to retry.</div>`;
     setHeaderStatus('error', 'Upload Error');
   }
 }
 
 /**
- * Drag and drop anywhere on the screen.
+ * Drag and drop anywhere on screen.
  */
 let dragCounter = 0;
 
@@ -540,11 +650,11 @@ window.addEventListener('drop', (e) => {
  */
 function startIdleTimer() {
   stopIdleTimer();
-  idleTimeRemaining = 180;
   updateIdleDisplay();
 
   idleTimer = setInterval(() => {
     idleTimeRemaining--;
+    if (currentCode) saveStoredSession(currentCode, idleTimeRemaining);
     updateIdleDisplay();
 
     if (idleTimeRemaining <= 0) {
@@ -563,12 +673,13 @@ function stopIdleTimer() {
 }
 
 function resetIdleTimer() {
-  idleTimeRemaining = 180;
+  idleTimeRemaining = TOTAL_IDLE_SECONDS;
+  if (currentCode) saveStoredSession(currentCode, idleTimeRemaining);
   updateIdleDisplay();
 }
 
 function updateIdleDisplay() {
-  const percentage = (idleTimeRemaining / 180) * 100;
+  const percentage = (idleTimeRemaining / TOTAL_IDLE_SECONDS) * 100;
   
   if (idleTimeoutFill) {
     idleTimeoutFill.style.width = `${percentage}%`;
@@ -590,7 +701,7 @@ function updateIdleDisplay() {
   }
 }
 
-// User interactions reset the 180s inactivity countdown
+// User interactions reset the 180s countdown
 window.addEventListener('click', resetIdleTimer);
 window.addEventListener('touchstart', resetIdleTimer);
 window.addEventListener('mousemove', resetIdleTimer);
@@ -653,5 +764,5 @@ pingInterval = setInterval(async () => {
   }
 }, 10000);
 
-// Initialize on page load
-initSession();
+// Initialize or resume on page load
+initSession(false);
