@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f4f5f7">
+  <link rel="manifest" href="/manifest.json">
+  <title>Print Kiosk • Document Station</title>
+  <link rel="stylesheet" href="/css/kiosk.css">
+  <!-- Bundled local QR Code generator: 100% offline resilient, zero CDN dependency -->
+  <script src="/js/vendor/qrcode.min.js"></script>
+</head>
+<body id="kiosk-body">
+
+  <!-- Network / Wi-Fi Diagnostic Banner -->
+  <div id="network-banner" role="status" aria-live="polite">
+    <span id="network-banner-text">⚠️ Reconnecting... Polling paused. Check your Wi-Fi connection.</span>
+  </div>
+
+  <!-- Header -->
+  <header>
+    <div class="kiosk-brand">
+      <div class="kiosk-logo-badge" aria-hidden="true">🖨️</div>
+      <div class="kiosk-title-text">
+        <h1>Print Station</h1>
+        <span>Two-Way Document Transfer</span>
+      </div>
+    </div>
+
+    <!-- Segmented Mode Pills (Reference Image 1) -->
+    <div class="header-tabs" role="tablist" aria-label="Transfer Modes">
+      <button class="tab-pill active" id="tab-receive" role="tab" aria-selected="true" type="button">
+        <span>Receive from Phone</span>
+        <span class="shortcut-chip">1</span>
+      </button>
+      <button class="tab-pill" id="tab-send" role="tab" aria-selected="false" type="button">
+        <span>Send to Phone</span>
+        <span class="shortcut-chip">2</span>
+      </button>
+    </div>
+
+    <!-- Status pill badge -->
+    <div class="status-pill" id="kiosk-status-pill">
+      <span class="status-dot online" id="status-dot"></span>
+      <span id="status-label">Ready</span>
+    </div>
+  </header>
+
+  <!-- Fullscreen Drag & Drop Overlay -->
+  <div id="drag-overlay" aria-hidden="true">
+    <span>📤 Drop files here to send to phone</span>
+  </div>
+
+  <main>
+
+    <!-- STATE 1: Idle / Receiving State (Phone -> Desktop) -->
+    <section class="view-panel active" id="view-idle" aria-label="Receive Mode">
+      <h2 class="panel-header-title">Send Files to Kiosk</h2>
+      <p class="panel-subtitle">Scan the QR code with your phone camera or enter the 4-digit code on the companion web app</p>
+
+      <!-- 4-digit numeric code card -->
+      <div class="code-card">
+        <div class="code-title-label">4-Digit Kiosk Code</div>
+        <div class="code-digits" id="display-code" aria-live="polite">----</div>
+      </div>
+
+      <!-- Crisp QR Code Card -->
+      <div class="qr-frame">
+        <canvas id="qr-canvas-receive" width="220" height="220" aria-label="Kiosk QR Code"></canvas>
+      </div>
+
+      <!-- Inactivity bar (180s timer) -->
+      <div class="timeout-wrapper">
+        <div class="timeout-bar-track">
+          <div class="timeout-bar-fill" id="idle-timeout-fill"></div>
+        </div>
+        <div class="timeout-label-text">
+          <span id="idle-timeout-label">Session active (180s inactivity reset)</span>
+          <button id="btn-manual-refresh" style="background:none; border:none; color:var(--text-tertiary); cursor:pointer; font-size:0.775rem; text-decoration:underline;" type="button">New Code</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- STATE 2: File(s) Received State (Phone -> Desktop) -->
+    <section class="view-panel" id="view-received" aria-label="Files Received">
+      <div style="font-size: 2.8rem; margin-bottom: 6px;" aria-hidden="true">✅</div>
+      <h2 class="panel-header-title">Documents Ready!</h2>
+      <p class="panel-subtitle">Your uploaded files are ready to print or download</p>
+
+      <!-- Attachments Section (Reference Image 2) -->
+      <div class="attachments-section">
+        <div class="attachments-header">
+          <h3>Attachments</h3>
+          <span class="attachment-count-chip" id="received-count-chip">0 files</span>
+        </div>
+
+        <div class="attachment-list" id="received-files-list">
+          <!-- Populated dynamically with Image 2 style attachment pills -->
+        </div>
+
+        <!-- Optional image thumbnails container -->
+        <div class="thumbnail-strip" id="received-thumbnail-strip" style="display: none;"></div>
+      </div>
+
+      <!-- Action Toolbar -->
+      <div class="actions-bar">
+        <button class="btn-primary-action" id="btn-print-all" type="button">
+          <span>🖨️ Print All Documents</span>
+        </button>
+        <button class="btn-secondary-action" id="btn-download-all" type="button">
+          <span>💾 Download All</span>
+        </button>
+      </div>
+
+      <!-- Finish & Clear Session -->
+      <button class="btn-danger-action" id="btn-reset-received" type="button">
+        <span>Finish & Clear Session (Purge Files)</span>
+      </button>
+
+      <!-- Inactivity Bar & Warning Banner -->
+      <div class="timeout-wrapper">
+        <div class="timeout-bar-track">
+          <div class="timeout-bar-fill" id="timeout-progress"></div>
+        </div>
+        <div class="timeout-label-text">
+          <span id="timeout-label">Session resets after 3 minutes of inactivity</span>
+        </div>
+        <div id="timeout-warning-banner" role="alert">
+          ⚠️ Inactivity Warning: Session will reset in 15 seconds! Touch the screen to keep your files.
+        </div>
+      </div>
+    </section>
+
+    <!-- STATE 3: Sending State (Desktop -> Phone) -->
+    <section class="view-panel" id="view-sending" aria-label="Send to Phone Mode">
+      <h2 class="panel-header-title">Send Files to Phone</h2>
+      <p class="panel-subtitle">Select or drop multiple documents or images to transfer to a mobile device</p>
+
+      <input type="file" id="desktop-file-input" multiple style="display: none;">
+
+      <!-- Dashed dropzone (Reference Image 2) -->
+      <div class="dashed-dropzone" id="desktop-dropzone" role="button" tabindex="0">
+        <div class="dropzone-icon" aria-hidden="true">📁</div>
+        <div class="dropzone-title">Drag & drop files here or click to browse</div>
+        <div class="dropzone-hint">Supports multiple PDFs, images, documents, and archives • Max 50MB per file</div>
+      </div>
+
+      <!-- Outbound QR Code Container (shown once uploaded) -->
+      <div id="outbound-qr-container" style="display: none; width: 100%;">
+        <div class="qr-frame">
+          <canvas id="qr-canvas-send" width="220" height="220" aria-label="Download QR Code"></canvas>
+        </div>
+
+        <div class="attachments-section">
+          <div class="attachments-header">
+            <h3>Files Ready for Phone Download</h3>
+            <span class="attachment-count-chip" id="outbound-count-chip">0 files</span>
+          </div>
+          <div class="attachment-list" id="outbound-files-list"></div>
+        </div>
+
+        <p class="panel-subtitle" style="margin-top: 10px;">Scan the QR code with any phone camera to download these files</p>
+      </div>
+
+      <div class="actions-bar">
+        <button class="btn-secondary-action" id="btn-back-to-receive" type="button" style="width: 100%;">
+          <span>← Back to Receive Mode</span>
+        </button>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Hidden iframe for instant direct printing -->
+  <iframe id="print-iframe" class="hidden-iframe" title="Print Frame"></iframe>
+
+  <script type="module" src="/js/kiosk.js"></script>
+</body>
+</html>
