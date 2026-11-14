@@ -1,18 +1,16 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 let supabase = null;
 
-if (supabaseUrl && supabaseKey) {
-  try {
-    supabase = createClient(supabaseUrl, supabaseKey, {
-      auth: { persistSession: false },
-    });
-  } catch (err) {
-    console.error('[supabase] Initialization error:', err.message);
-  }
+try {
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth: { persistSession: false },
+  });
+} catch (err) {
+  console.error('[supabase] Initialization error:', err.message);
 }
 
 export function getSupabase() {
@@ -37,12 +35,13 @@ export function sanitizeFileName(rawName) {
 }
 
 /**
- * Retrieve session by 4-digit code from Supabase
+ * Retrieve session by 4-digit code (Tries Postgres table first, falls back to Storage bucket)
  */
 export async function getSession(code) {
   if (!isValidCode(code) || !supabase) return null;
   const cleanCode = code.trim();
 
+  // 1. Primary: Try public.sessions table
   try {
     const { data, error } = await supabase
       .from('sessions')
@@ -50,24 +49,37 @@ export async function getSession(code) {
       .eq('code', cleanCode)
       .single();
 
-    if (error || !data) return null;
-
-    // Check expiration (3 minutes)
-    const expiresAt = new Date(data.expires_at).getTime();
-    if (Date.now() > expiresAt) {
-      await deleteSession(cleanCode);
-      return null;
+    if (!error && data) {
+      const expiresAt = new Date(data.expires_at).getTime();
+      if (Date.now() > expiresAt) {
+        await deleteSession(cleanCode);
+        return null;
+      }
+      return { session: data };
     }
+  } catch (err) {}
 
-    return { session: data };
-  } catch (err) {
-    console.error(`[supabase] getSession error (${cleanCode}):`, err.message);
-    return null;
-  }
+  // 2. Fallback: Check storage bucket (_sessions/{code}.json)
+  try {
+    const path = `_sessions/${cleanCode}.json`;
+    const { data, error } = await supabase.storage.from('documents').download(path);
+    if (!error && data) {
+      const text = await data.text();
+      const session = JSON.parse(text);
+      const expiresAt = new Date(session.expires_at).getTime();
+      if (Date.now() > expiresAt) {
+        await deleteSession(cleanCode);
+        return null;
+      }
+      return { session };
+    }
+  } catch (err) {}
+
+  return null;
 }
 
 /**
- * Save or update session in Supabase
+ * Save or update session (Writes to Postgres table, falls back to Storage bucket)
  */
 export async function saveSession(code, sessionData) {
   if (!isValidCode(code) || !supabase) return null;
@@ -80,10 +92,12 @@ export async function saveSession(code, sessionData) {
     status: sessionData.status || 'waiting',
     mode: sessionData.mode || 'receive',
     files: Array.isArray(sessionData.files) ? sessionData.files : [],
+    created_at: sessionData.created_at || now.toISOString(),
     updated_at: now.toISOString(),
     expires_at: expiresAt.toISOString(),
   };
 
+  // 1. Primary: Upsert into public.sessions table
   try {
     const { data, error } = await supabase
       .from('sessions')
@@ -91,44 +105,48 @@ export async function saveSession(code, sessionData) {
       .select()
       .single();
 
-    if (error) {
-      console.error(`[supabase] saveSession error (${cleanCode}):`, error.message);
-      return null;
+    if (!error && data) {
+      return data;
     }
+  } catch (err) {}
 
-    return data;
+  // 2. Fallback: Save to storage bucket (_sessions/{code}.json)
+  try {
+    const path = `_sessions/${cleanCode}.json`;
+    await supabase.storage.from('documents').upload(path, JSON.stringify(payload), {
+      contentType: 'application/json',
+      upsert: true,
+    });
+    return payload;
   } catch (err) {
-    console.error(`[supabase] saveSession exception (${cleanCode}):`, err.message);
+    console.error(`[supabase] saveSession fallback error (${cleanCode}):`, err.message);
     return null;
   }
 }
 
 /**
- * Delete session and clean up any associated files from storage
+ * Delete session and purge stored files
  */
 export async function deleteSession(code) {
   if (!isValidCode(code) || !supabase) return false;
   const cleanCode = code.trim();
 
   try {
-    // 1. Fetch file list to delete from storage
-    const { data: session } = await supabase
-      .from('sessions')
-      .select('files')
-      .eq('code', cleanCode)
-      .single();
-
-    if (session && Array.isArray(session.files) && session.files.length > 0) {
-      const pathsToDelete = session.files
-        .map(f => f.storagePath || f.pathname)
-        .filter(Boolean);
-
-      if (pathsToDelete.length > 0) {
-        await supabase.storage.from('documents').remove(pathsToDelete);
-      }
+    // 1. Get file list to purge
+    let filesToDelete = [];
+    const sessionWrap = await getSession(cleanCode);
+    if (sessionWrap?.session?.files?.length) {
+      filesToDelete = sessionWrap.session.files.map(f => f.storagePath).filter(Boolean);
     }
 
-    // 2. Delete row from sessions table
+    if (filesToDelete.length > 0) {
+      await supabase.storage.from('documents').remove(filesToDelete);
+    }
+
+    // 2. Remove fallback session JSON
+    await supabase.storage.from('documents').remove([`_sessions/${cleanCode}.json`]);
+
+    // 3. Remove row from table
     await supabase.from('sessions').delete().eq('code', cleanCode);
     return true;
   } catch (err) {
@@ -138,18 +156,28 @@ export async function deleteSession(code) {
 }
 
 /**
- * Temporary Pre-Upload Jobs Support (Reuses sessions table with job_ prefix)
+ * Pre-upload temporary jobs support
  */
 export async function getJob(jobId) {
   if (!jobId || !supabase) return null;
   const key = `job_${String(jobId).trim().replace(/[^a-zA-Z0-9_-]/g, '')}`;
+
   try {
     const { data } = await supabase.from('sessions').select('*').eq('code', key).single();
-    if (!data) return null;
-    return { job: { files: data.files, jobId } };
-  } catch (e) {
-    return null;
-  }
+    if (data) return { job: { files: data.files, jobId } };
+  } catch (e) {}
+
+  try {
+    const path = `_jobs/${key}.json`;
+    const { data } = await supabase.storage.from('documents').download(path);
+    if (data) {
+      const text = await data.text();
+      const job = JSON.parse(text);
+      return { job: { files: job.files, jobId } };
+    }
+  } catch (e) {}
+
+  return null;
 }
 
 export async function saveJob(jobId, jobData) {
@@ -157,28 +185,39 @@ export async function saveJob(jobId, jobData) {
   const key = `job_${String(jobId).trim().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 600 * 1000); // 10 minutes
+
+  const payload = {
+    code: key,
+    status: 'pending',
+    mode: 'receive',
+    files: jobData.files || [],
+    created_at: now.toISOString(),
+    updated_at: now.toISOString(),
+    expires_at: expiresAt.toISOString(),
+  };
+
   try {
-    const { data } = await supabase.from('sessions').upsert({
-      code: key,
-      status: 'pending',
-      mode: 'receive',
-      files: jobData.files || [],
-      updated_at: now.toISOString(),
-      expires_at: expiresAt.toISOString(),
-    }).select().single();
-    return data;
-  } catch (e) {
-    return null;
-  }
+    const { data } = await supabase.from('sessions').upsert(payload).select().single();
+    if (data) return data;
+  } catch (e) {}
+
+  try {
+    const path = `_jobs/${key}.json`;
+    await supabase.storage.from('documents').upload(path, JSON.stringify(payload), {
+      contentType: 'application/json',
+      upsert: true,
+    });
+    return payload;
+  } catch (e) {}
+
+  return null;
 }
 
 export async function deleteJob(jobId) {
   if (!jobId || !supabase) return false;
   const key = `job_${String(jobId).trim().replace(/[^a-zA-Z0-9_-]/g, '')}`;
-  try {
-    await supabase.from('sessions').delete().eq('code', key);
-    return true;
-  } catch (e) {
-    return false;
-  }
+
+  try { await supabase.from('sessions').delete().eq('code', key); } catch (e) {}
+  try { await supabase.storage.from('documents').remove([`_jobs/${key}.json`]); } catch (e) {}
+  return true;
 }

@@ -19,17 +19,18 @@ let idleTimeRemaining = TOTAL_IDLE_SECONDS;
 const displayCode = document.getElementById('display-code');
 const qrCanvasReceive = document.getElementById('qr-canvas-receive');
 const qrCanvasSend = document.getElementById('qr-canvas-send');
-const networkBanner = document.getElementById('network-banner');
 const statusDot = document.getElementById('status-dot');
 const statusLabel = document.getElementById('status-label');
+
+const tabReceive = document.getElementById('tab-receive');
+const tabSend = document.getElementById('tab-send');
+const tabReset = document.getElementById('tab-reset');
 
 const viewReceive = document.getElementById('view-receive');
 const viewReceived = document.getElementById('view-received');
 const viewSending = document.getElementById('view-sending');
 
 const btnTriggerSendMode = document.getElementById('btn-trigger-send-mode');
-const btnBackToReceive = document.getElementById('btn-back-to-receive');
-const btnManualRefresh = document.getElementById('btn-manual-refresh');
 
 const receivedFilesList = document.getElementById('received-files-list');
 const receivedThumbnailGrid = document.getElementById('received-thumbnail-grid');
@@ -45,11 +46,7 @@ const outboundThumbnailGrid = document.getElementById('outbound-thumbnail-grid')
 const outboundQrContainer = document.getElementById('outbound-qr-container');
 
 const dragOverlay = document.getElementById('drag-overlay');
-const idleTimeoutFill = document.getElementById('idle-timeout-fill');
 const idleTimeoutLabel = document.getElementById('idle-timeout-label');
-const timeoutProgress = document.getElementById('timeout-progress');
-const timeoutLabel = document.getElementById('timeout-label');
-const timeoutWarningBanner = document.getElementById('timeout-warning-banner');
 const printIframe = document.getElementById('print-iframe');
 
 /**
@@ -144,11 +141,24 @@ function setHeaderStatus(type, text) {
   statusLabel.textContent = text;
 }
 
+function updateTabs(activeState) {
+  tabReceive.classList.toggle('active', activeState === 'receive' || activeState === 'received');
+  tabReceive.setAttribute('aria-selected', activeState === 'receive' || activeState === 'received');
+
+  tabSend.classList.toggle('active', activeState === 'sending');
+  tabSend.setAttribute('aria-selected', activeState === 'sending');
+
+  tabReset.classList.remove('active');
+  tabReset.setAttribute('aria-selected', 'false');
+}
+
 function setViewState(state) {
   currentState = state;
   viewReceive.classList.remove('active');
   viewReceived.classList.remove('active');
   viewSending.classList.remove('active');
+
+  updateTabs(state);
 
   if (state === 'receive') {
     viewReceive.classList.add('active');
@@ -156,7 +166,7 @@ function setViewState(state) {
     startIdleTimer();
   } else if (state === 'received') {
     viewReceived.classList.add('active');
-    setHeaderStatus('online', 'Documents Ready');
+    setHeaderStatus('online', 'Files Ready');
     startIdleTimer();
   } else if (state === 'sending') {
     viewSending.classList.add('active');
@@ -170,7 +180,7 @@ function renderQrCode(canvas, text) {
   if (window.QRCode && typeof window.QRCode.toCanvas === 'function') {
     try {
       window.QRCode.toCanvas(canvas, text, {
-        width: 220,
+        width: 160,
         margin: 1,
         color: { dark: '#0f172a', light: '#ffffff' },
       }, (err) => {
@@ -195,7 +205,7 @@ async function setupRealtimeListener(code) {
 
   const client = await getSupabaseClient();
   if (!client) {
-    console.log('[kiosk] Supabase client not ready; relying on gentle poll fallback');
+    console.log('[kiosk] Supabase client initializing; gentle poll active');
     return;
   }
 
@@ -223,10 +233,9 @@ async function setupRealtimeListener(code) {
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
-          networkBanner.classList.remove('active');
-          setHeaderStatus('online', 'Live Synchronized');
+          setHeaderStatus('online', 'Synchronized');
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          setHeaderStatus('warning', 'Reconnecting...');
+          setHeaderStatus('warning', 'Connecting...');
         }
       });
   } catch (e) {
@@ -235,7 +244,7 @@ async function setupRealtimeListener(code) {
 }
 
 /**
- * Gentle 4-second Polling Fallback (Uses Postgres/REST, ZERO storage ops)
+ * Gentle 4-second Polling Fallback (Costs 0 storage operations)
  */
 function startPollingFallback() {
   stopPollingFallback();
@@ -243,12 +252,7 @@ function startPollingFallback() {
     if (!currentCode) return;
     try {
       const res = await fetch(`/api/status?code=${currentCode}&t=${Date.now()}`);
-      if (!res.ok) {
-        if (res.status === 404 && currentState === 'receive') {
-          // Wait for grace period before regenerating
-        }
-        return;
-      }
+      if (!res.ok) return;
       const data = await res.json();
       const files = Array.isArray(data.files) && data.files.length > 0
         ? data.files
@@ -261,7 +265,7 @@ function startPollingFallback() {
         }
       }
     } catch (e) {
-      setHeaderStatus('warning', 'Wi-Fi Reconnecting...');
+      setHeaderStatus('warning', 'Reconnecting...');
     }
   }, 4000);
 }
@@ -330,7 +334,7 @@ async function initSession(forceNew = false) {
     setupRealtimeListener(currentCode);
     startPollingFallback();
     setViewState('receive');
-    setHeaderStatus('online', 'Ready for Files');
+    setHeaderStatus('online', 'Ready');
   } catch (err) {
     console.error('Failed to initialize session:', err);
     setHeaderStatus('error', 'Connection Error');
@@ -492,19 +496,46 @@ async function resetSession() {
 }
 
 btnResetReceived.addEventListener('click', resetSession);
-btnManualRefresh.addEventListener('click', resetSession);
 
 /**
- * Transforming Center Hub Transitions
+ * Tab Navigation (Reference Image 1)
  */
-btnTriggerSendMode.addEventListener('click', () => {
+tabReceive.addEventListener('click', () => {
+  setViewState(currentFiles.length > 0 ? 'received' : 'receive');
+});
+
+tabSend.addEventListener('click', () => {
   setViewState('sending');
-  outboundQrContainer.style.display = 'none';
+  outboundQrContainer.style.display = stagedOutboundFiles.length > 0 ? 'block' : 'none';
   outboundAttachmentsContainer.style.display = stagedOutboundFiles.length > 0 ? 'block' : 'none';
 });
 
-btnBackToReceive.addEventListener('click', () => {
-  setViewState(currentFiles.length > 0 ? 'received' : 'receive');
+tabReset.addEventListener('click', resetSession);
+
+/**
+ * Keyboard Shortcuts matching Reference Image 1: Shift + 1, Shift + 2, Shift + 3
+ */
+window.addEventListener('keydown', (e) => {
+  if (e.shiftKey) {
+    if (e.key === '!' || e.key === '1') {
+      e.preventDefault();
+      setViewState(currentFiles.length > 0 ? 'received' : 'receive');
+    } else if (e.key === '@' || e.key === '2') {
+      e.preventDefault();
+      setViewState('sending');
+    } else if (e.key === '#' || e.key === '3') {
+      e.preventDefault();
+      resetSession();
+    }
+  }
+});
+
+/**
+ * Transforming Dropzone Trigger
+ */
+btnTriggerSendMode.addEventListener('click', () => {
+  setViewState('sending');
+  desktopFileInput.click();
 });
 
 desktopDropzone.addEventListener('click', () => desktopFileInput.click());
@@ -524,11 +555,10 @@ async function handleDesktopFilesUpload(files) {
     }
   }
 
-  setHeaderStatus('warning', 'Uploading to Supabase...');
+  setHeaderStatus('warning', 'Uploading...');
   const client = await getSupabaseClient();
   if (!client) {
-    alert('Supabase is not configured yet. Please set SUPABASE_URL and SUPABASE_ANON_KEY.');
-    setHeaderStatus('error', 'Supabase Not Configured');
+    alert('Connecting to Supabase storage...');
     return;
   }
 
@@ -568,7 +598,6 @@ async function handleDesktopFilesUpload(files) {
       }),
     });
 
-    // Realtime broadcast to mobile
     if (realtimeChannel) {
       try {
         realtimeChannel.send({
@@ -642,7 +671,6 @@ function renderOutboundAttachments() {
     outboundFilesList.appendChild(pill);
   });
 
-  // Append '+' card matching Reference Image 2
   const addCard = document.createElement('div');
   addCard.className = 'ref-add-card';
   addCard.innerHTML = '+';
@@ -705,7 +733,7 @@ window.addEventListener('drop', (e) => {
 });
 
 /**
- * Inactivity Timer (Only resets after 3 minutes / completed action / manual)
+ * Inactivity Timer
  */
 function startIdleTimer() {
   stopIdleTimer();
@@ -727,7 +755,6 @@ function stopIdleTimer() {
     clearInterval(idleTimer);
     idleTimer = null;
   }
-  if (timeoutWarningBanner) timeoutWarningBanner.classList.remove('active');
 }
 
 function resetIdleTimer() {
@@ -737,25 +764,8 @@ function resetIdleTimer() {
 }
 
 function updateIdleDisplay() {
-  const percentage = (idleTimeRemaining / TOTAL_IDLE_SECONDS) * 100;
-
-  if (idleTimeoutFill) {
-    idleTimeoutFill.style.width = `${percentage}%`;
-    idleTimeoutLabel.textContent = `Session active (${idleTimeRemaining}s inactivity reset)`;
-  }
-
-  if (timeoutProgress) {
-    timeoutProgress.style.width = `${percentage}%`;
-    timeoutProgress.className = idleTimeRemaining <= 15 ? 'timeout-bar-fill warning' : 'timeout-bar-fill';
-    timeoutLabel.textContent = `Session resets in ${idleTimeRemaining}s of inactivity`;
-  }
-
-  if (timeoutWarningBanner) {
-    if (idleTimeRemaining <= 15 && (currentState === 'received' || currentState === 'sending')) {
-      timeoutWarningBanner.classList.add('active');
-    } else {
-      timeoutWarningBanner.classList.remove('active');
-    }
+  if (idleTimeoutLabel) {
+    idleTimeoutLabel.textContent = `${idleTimeRemaining}s`;
   }
 }
 
@@ -763,7 +773,7 @@ window.addEventListener('click', resetIdleTimer);
 window.addEventListener('touchstart', resetIdleTimer);
 window.addEventListener('mousemove', resetIdleTimer);
 
-window.addEventListener('offline', () => setHeaderStatus('warning', 'Wi-Fi Reconnecting...'));
+window.addEventListener('offline', () => setHeaderStatus('warning', 'Reconnecting...'));
 window.addEventListener('online', () => {
   if (currentCode) setupRealtimeListener(currentCode);
 });

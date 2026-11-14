@@ -2,196 +2,170 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#f2f3f5">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#eceff5">
   <link rel="manifest" href="/manifest.json">
-  <title>Print Station • Document Transfer</title>
+  <title>Print Station</title>
+  
+  <!-- Premium Modern Fonts: Plus Jakarta Sans for UI & JetBrains Mono for Code / Station Code -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  
   <link rel="stylesheet" href="/css/kiosk.css">
-  <!-- Bundled local QR Code generator: 100% offline resilient, zero CDN dependency -->
+  <!-- Bundled offline-resilient QR Code generator -->
   <script src="/js/vendor/qrcode.min.js"></script>
 </head>
 <body id="kiosk-body">
 
-  <!-- Network / Wi-Fi Diagnostic Banner -->
-  <div id="network-banner" role="status" aria-live="polite">
-    <span id="network-banner-text">⚠️ Reconnecting... Polling paused. Check your Wi-Fi connection.</span>
-  </div>
+  <!-- Main Viewport Enclosure (Strictly 100vh / No Scroll) -->
+  <div class="kiosk-canvas-wrapper">
 
-  <!-- Header: Clean Brand & Live Status (Top tabs removed) -->
-  <header>
-    <div class="kiosk-brand">
-      <div class="kiosk-logo-badge" aria-hidden="true">🖨️</div>
-      <div class="kiosk-title-text">
-        <h1>Print Station</h1>
-        <span>Two-Way Document Transfer</span>
-      </div>
-    </div>
+    <!-- 1:1 Centered Master Card matching Reference Image 1 -->
+    <div class="master-card" id="master-card">
 
-    <!-- Right Header Controls -->
-    <div class="header-right">
-      <div class="status-pill" id="kiosk-status-pill">
-        <span class="status-dot online" id="status-dot"></span>
-        <span id="status-label">Synchronized</span>
-      </div>
-      <button id="btn-manual-refresh" class="btn-secondary-action" style="padding: 6px 14px; font-size: 0.8rem;" type="button">
-        <span>🔄 New Code</span>
-      </button>
-    </div>
-  </header>
+      <!-- LEFT COLUMN: Navigation Tabs, Handshake & Exact Ref 2 Attachments -->
+      <div class="left-panel">
 
-  <!-- Fullscreen Drag & Drop Overlay -->
-  <div id="drag-overlay" aria-hidden="true">
-    <span>📤 Drop files here to send to mobile phone</span>
-  </div>
-
-  <main>
-    <div class="kiosk-grid-container">
-
-      <!-- LEFT: Transforming Center Hub Card -->
-      <section class="hub-card" id="main-hub-card">
-
-        <!-- VIEW 1: Default Receive State (Phone -> Desktop) -->
-        <div class="hub-view active" id="view-receive">
-          <h2 class="panel-header-title">Send to Station</h2>
-          <p class="panel-subtitle">Scan the QR code with your phone camera or enter the 4-digit code on mobile</p>
-
-          <!-- 4-digit numeric code card -->
-          <div class="code-card">
-            <div class="code-title-label">Station Kiosk Code</div>
-            <div class="code-digits" id="display-code" aria-live="polite">----</div>
-          </div>
-
-          <!-- Crisp QR Code Card -->
-          <div class="qr-frame">
-            <canvas id="qr-canvas-receive" width="220" height="220" aria-label="Kiosk QR Code"></canvas>
-          </div>
-
-          <!-- Format Pills Row -->
-          <div class="format-pills-row" aria-label="Supported Document Formats">
-            <span class="format-pill">PDF</span>
-            <span class="format-pill">PPT / PPTX</span>
-            <span class="format-pill">WORD DOC</span>
-            <span class="format-pill">EXCEL</span>
-            <span class="format-pill">IMAGES</span>
-            <span class="format-pill">ZIP</span>
-          </div>
-
-          <!-- Exact Reference Upload Trigger Box (Transforms to Send Mode) -->
-          <div class="ref-upload-outer" id="btn-trigger-send-mode">
-            <div class="ref-upload-dashed">
-              <div class="ref-upload-title">Drag and drop files here or click to browse.</div>
-              <div class="ref-upload-sub">Maximum 50MB File Size • Drop to send to phone</div>
-            </div>
-          </div>
-
-          <!-- Inactivity Countdown Bar -->
-          <div class="timeout-wrapper">
-            <div class="timeout-bar-track">
-              <div class="timeout-bar-fill" id="idle-timeout-fill"></div>
-            </div>
-            <div class="timeout-label-text">
-              <span id="idle-timeout-label">Session active (180s inactivity reset)</span>
-              <span>Spotty Wi-Fi Resilient</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- VIEW 2: Documents Received State (Exact Reference Image 2 Style) -->
-        <div class="hub-view" id="view-received">
-          <div style="font-size: 2.2rem; margin-bottom: 2px;" aria-hidden="true">✅</div>
-          <h2 class="panel-header-title">Documents Ready!</h2>
-          <p class="panel-subtitle">Your files are ready to print or save to this station</p>
-
-          <!-- Section: "Attachments" matching Ref Image 2 -->
-          <div class="ref-attachments-container">
-            <div class="ref-attachments-title">Attachments</div>
-            <div class="ref-attachment-list" id="received-files-list"></div>
-            <div class="ref-thumbnail-grid" id="received-thumbnail-grid" style="display: none;"></div>
-          </div>
-
-          <!-- Action Toolbar -->
-          <div class="actions-bar">
-            <button class="btn-primary-action" id="btn-print-all" type="button">
-              <span>🖨️ Print All Documents</span>
-            </button>
-            <button class="btn-secondary-action" id="btn-download-all" type="button">
-              <span>💾 Save All</span>
-            </button>
-          </div>
-
-          <!-- Finish & Clear Session -->
-          <button class="btn-danger-action" id="btn-reset-received" type="button">
-            <span>Finish & Clear Session (Purge Files)</span>
+        <!-- Shift+1, Shift+2, Shift+3 Tabs matching Reference Image 1 -->
+        <nav class="ref-tabs" role="tablist" aria-label="Station Navigation">
+          <button class="ref-tab active" id="tab-receive" role="tab" aria-selected="true" type="button">
+            <span class="ref-tab-kbd">Shift + 1</span>
+            <span class="ref-tab-name">Receive</span>
           </button>
+          <button class="ref-tab" id="tab-send" role="tab" aria-selected="false" type="button">
+            <span class="ref-tab-kbd">Shift + 2</span>
+            <span class="ref-tab-name">Send</span>
+          </button>
+          <button class="ref-tab" id="tab-reset" role="tab" aria-selected="false" type="button" title="New Station Code (Shift + 3)">
+            <span class="ref-tab-kbd">Shift + 3</span>
+            <span class="ref-tab-name">New Code</span>
+          </button>
+        </nav>
 
-          <!-- Inactivity Bar & Warning Banner -->
-          <div class="timeout-wrapper">
-            <div class="timeout-bar-track">
-              <div class="timeout-bar-fill" id="timeout-progress"></div>
+        <!-- Dynamic Content Body -->
+        <div class="panel-body">
+
+          <!-- VIEW 1: Default Receive Screen (QR Code, Station Code, and Reference Dropzone) -->
+          <div class="station-view active" id="view-receive">
+            <div class="station-header">
+              <h1 class="ref-heading">Receive</h1>
+              <p class="ref-subheading">Scan QR or enter station code on mobile</p>
             </div>
-            <div class="timeout-label-text">
-              <span id="timeout-label">Session resets in 180s of inactivity</span>
+
+            <!-- Code & QR Handshake Box -->
+            <div class="handshake-row">
+              <div class="ref-code-card">
+                <span class="ref-code-label">STATION CODE</span>
+                <span class="ref-code-value" id="display-code">----</span>
+              </div>
+              <div class="qr-wrapper">
+                <canvas id="qr-canvas-receive" width="160" height="160" aria-label="Station QR Code"></canvas>
+              </div>
             </div>
-            <div id="timeout-warning-banner" role="alert">
-              ⚠️ Inactivity Warning: Session will reset in 15 seconds! Touch screen to keep.
+
+            <!-- Exact Reference Image 2 Dropzone (Triggers Send Mode on drop/click) -->
+            <div class="ref-upload-outer" id="btn-trigger-send-mode">
+              <div class="ref-upload-dashed">
+                <div class="ref-upload-title">Drag and drop files here or click to browse.</div>
+                <div class="ref-upload-sub">Maximum 50MB File Size</div>
+              </div>
             </div>
           </div>
+
+          <!-- VIEW 2: Documents Received State (Exact Reference Image 2 Style) -->
+          <div class="station-view" id="view-received">
+            <div class="station-header">
+              <h1 class="ref-heading">Ready</h1>
+              <p class="ref-subheading">Files received at this station</p>
+            </div>
+
+            <!-- Exact Reference Image 2 Attachments Section -->
+            <div class="ref-attachments-container">
+              <div class="ref-attachments-title">Attachments</div>
+              <div class="ref-attachment-list" id="received-files-list"></div>
+              <div class="ref-thumbnail-grid" id="received-thumbnail-grid" style="display: none;"></div>
+            </div>
+
+            <!-- Actions Bar -->
+            <div class="ref-actions-bar">
+              <button class="btn-ref-primary" id="btn-print-all" type="button">
+                <span>🖨️ Print All</span>
+              </button>
+              <button class="btn-ref-secondary" id="btn-download-all" type="button">
+                <span>💾 Save All</span>
+              </button>
+              <button class="btn-ref-danger" id="btn-reset-received" type="button">
+                <span>Finish & Clear</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- VIEW 3: Sending State (Exact Reference Image 2 Style) -->
+          <div class="station-view" id="view-sending">
+            <div class="station-header">
+              <h1 class="ref-heading">Send</h1>
+              <p class="ref-subheading">Drop files to dispatch to mobile phone</p>
+            </div>
+
+            <input type="file" id="desktop-file-input" multiple style="display: none;">
+
+            <!-- Exact Reference Upload Dropzone Box -->
+            <div class="ref-upload-outer">
+              <div class="ref-upload-dashed" id="desktop-dropzone" role="button" tabindex="0">
+                <div class="ref-upload-title">Drag and drop files here or click to browse.</div>
+                <div class="ref-upload-sub">Maximum 50MB File Size</div>
+              </div>
+            </div>
+
+            <!-- Staged Attachments -->
+            <div class="ref-attachments-container" id="outbound-attachments-container" style="display: none;">
+              <div class="ref-attachments-title">Attachments</div>
+              <div class="ref-attachment-list" id="outbound-files-list"></div>
+              <div class="ref-thumbnail-grid" id="outbound-thumbnail-grid"></div>
+            </div>
+
+            <!-- Outbound QR Frame -->
+            <div id="outbound-qr-container" style="display: none;">
+              <div class="outbound-qr-frame">
+                <canvas id="qr-canvas-send" width="150" height="150" aria-label="Mobile Download QR Code"></canvas>
+                <span class="ref-subheading" style="margin-top: 6px;">Scan to download to mobile</span>
+              </div>
+            </div>
+          </div>
+
         </div>
 
-        <!-- VIEW 3: Sending State (Exact Reference Image 2 Style) -->
-        <div class="hub-view" id="view-sending">
-          <h2 class="panel-header-title">Send to Mobile Phone</h2>
-          <p class="panel-subtitle">Select or drop presentations, documents, or images to download to phone</p>
-
-          <input type="file" id="desktop-file-input" multiple style="display: none;">
-
-          <!-- Exact Reference Upload Dropzone Box -->
-          <div class="ref-upload-outer">
-            <div class="ref-upload-dashed" id="desktop-dropzone" role="button" tabindex="0">
-              <div class="ref-upload-title">Drag and drop files here or click to browse.</div>
-              <div class="ref-upload-sub">Maximum 50MB File Size • PPT, PDF, DOC, XLS, Images, Zip</div>
-            </div>
+        <!-- Bottom Footer Info: Minimal Status & 180s Countdown Bar -->
+        <footer class="panel-footer">
+          <div class="status-indicator">
+            <span class="status-dot online" id="status-dot"></span>
+            <span id="status-label">Synchronized</span>
           </div>
-
-          <!-- Outbound Staged & Uploaded Attachments (Ref Image 2 Style) -->
-          <div class="ref-attachments-container" id="outbound-attachments-container" style="display: none;">
-            <div class="ref-attachments-title">Attachments</div>
-            <div class="ref-attachment-list" id="outbound-files-list"></div>
-            <div class="ref-thumbnail-grid" id="outbound-thumbnail-grid"></div>
+          <div class="timeout-pill" id="idle-timeout-pill">
+            <span id="idle-timeout-label">180s</span>
           </div>
+        </footer>
 
-          <!-- Outbound QR Code Container -->
-          <div id="outbound-qr-container" style="display: none; width: 100%; margin-top: 10px;">
-            <div class="qr-frame">
-              <canvas id="qr-canvas-send" width="220" height="220" aria-label="Download QR Code"></canvas>
-            </div>
-            <p class="panel-subtitle" style="margin-top: 4px;">Scan with phone camera to download these attachments</p>
-          </div>
+      </div>
 
-          <div class="actions-bar" style="margin-top: 12px;">
-            <button class="btn-secondary-action" id="btn-back-to-receive" type="button" style="width: 100%;">
-              <span>← Back to Receive Screen</span>
-            </button>
-          </div>
+      <!-- RIGHT COLUMN: Pristine Landscape Rectangle (Reference Image 1, NO text on top) -->
+      <div class="right-panel">
+        <div class="landscape-frame">
+          <img src="/assets/hero-landscape.jpg" alt="Serene rolling green hills landscape" class="landscape-img" loading="eager">
         </div>
-
-      </section>
-
-      <!-- RIGHT: Editorial Artwork Card (Reference Images 1 & 3) -->
-      <aside class="artwork-card" aria-label="Editorial Visual Frame">
-        <img src="/assets/hero-landscape.jpg" alt="Serene rolling green hills landscape" class="artwork-img" loading="eager">
-        <div class="artwork-overlay-gradient"></div>
-        <div class="artwork-content">
-          <span class="artwork-badge">Curated Station</span>
-          <h3 class="artwork-heading">Seamless Document Handshake</h3>
-          <p class="artwork-text">Instant peer-to-station transfer with zero sign-ups, resilient against spotty Wi-Fi.</p>
-        </div>
-      </aside>
+      </div>
 
     </div>
-  </main>
 
-  <!-- Hidden iframe for instant direct browser printing -->
+  </div>
+
+  <!-- Fullscreen Drop Overlay -->
+  <div id="drag-overlay" aria-hidden="true">
+    <span>📤 Drop files here to send</span>
+  </div>
+
+  <!-- Hidden iframe for instant printing -->
   <iframe id="print-iframe" class="hidden-iframe" title="Print Frame"></iframe>
 
   <script type="module" src="/js/kiosk.js"></script>
