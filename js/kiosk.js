@@ -194,7 +194,7 @@ async function initSession(forceNew = false) {
       idleTimeRemaining = remaining;
       displayCode.textContent = currentCode;
 
-      const mobileUrl = `${window.location.origin}/mobile.html?code=${currentCode}`;
+      const mobileUrl = `${window.location.origin}/mobile?code=${currentCode}`;
       renderQrCode(qrCanvasReceive, mobileUrl);
 
       // Verify status with server smoothly
@@ -247,7 +247,7 @@ async function initSession(forceNew = false) {
 
     displayCode.textContent = currentCode;
 
-    const mobileUrl = `${window.location.origin}/mobile.html?code=${currentCode}`;
+    const mobileUrl = `${window.location.origin}/mobile?code=${currentCode}`;
     renderQrCode(qrCanvasReceive, mobileUrl);
 
     setViewState('idle');
@@ -600,7 +600,7 @@ async function handleDesktopFilesUpload(files) {
       outboundFilesList.appendChild(row);
     });
 
-    const downloadUrl = `${window.location.origin}/mobile.html?action=download&code=${currentCode}`;
+    const downloadUrl = `${window.location.origin}/mobile?action=download&code=${currentCode}`;
     renderQrCode(qrCanvasSend, downloadUrl);
 
     setHeaderStatus('online', 'Ready for Phone Download');
