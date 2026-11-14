@@ -1,51 +1,48 @@
-import { upload } from '/js/vendor/blob-client.js';
+import { createClient } from '/js/vendor/supabase.min.js';
 
 // Constants
-const SESSION_STORAGE_KEY = 'kiosk_station_session_v2';
+const SESSION_STORAGE_KEY = 'kiosk_station_session_v5';
 const TOTAL_IDLE_SECONDS = 180; // 3 minutes
 
 // Global state
 let currentCode = null;
 let currentFiles = [];
-let currentState = 'idle'; // 'idle' | 'received' | 'sending'
+let stagedOutboundFiles = [];
+let currentState = 'receive'; // 'receive' | 'received' | 'sending'
+let supabaseClient = null;
+let realtimeChannel = null;
 let pollInterval = null;
-let pingInterval = null;
 let idleTimer = null;
 let idleTimeRemaining = TOTAL_IDLE_SECONDS;
-let consecutive404Count = 0;
-let isOffline = false;
 
 // DOM Elements
-const body = document.getElementById('kiosk-body');
 const displayCode = document.getElementById('display-code');
 const qrCanvasReceive = document.getElementById('qr-canvas-receive');
 const qrCanvasSend = document.getElementById('qr-canvas-send');
 const networkBanner = document.getElementById('network-banner');
-const networkBannerText = document.getElementById('network-banner-text');
 const statusDot = document.getElementById('status-dot');
 const statusLabel = document.getElementById('status-label');
 
-const tabReceive = document.getElementById('tab-receive');
-const tabSend = document.getElementById('tab-send');
-
-const viewIdle = document.getElementById('view-idle');
+const viewReceive = document.getElementById('view-receive');
 const viewReceived = document.getElementById('view-received');
 const viewSending = document.getElementById('view-sending');
 
-const receivedCountChip = document.getElementById('received-count-chip');
+const btnTriggerSendMode = document.getElementById('btn-trigger-send-mode');
+const btnBackToReceive = document.getElementById('btn-back-to-receive');
+const btnManualRefresh = document.getElementById('btn-manual-refresh');
+
 const receivedFilesList = document.getElementById('received-files-list');
-const receivedThumbnailStrip = document.getElementById('received-thumbnail-strip');
+const receivedThumbnailGrid = document.getElementById('received-thumbnail-grid');
 const btnPrintAll = document.getElementById('btn-print-all');
 const btnDownloadAll = document.getElementById('btn-download-all');
 const btnResetReceived = document.getElementById('btn-reset-received');
-const btnManualRefresh = document.getElementById('btn-manual-refresh');
 
-const btnBackToReceive = document.getElementById('btn-back-to-receive');
 const desktopFileInput = document.getElementById('desktop-file-input');
 const desktopDropzone = document.getElementById('desktop-dropzone');
-const outboundQrContainer = document.getElementById('outbound-qr-container');
-const outboundCountChip = document.getElementById('outbound-count-chip');
+const outboundAttachmentsContainer = document.getElementById('outbound-attachments-container');
 const outboundFilesList = document.getElementById('outbound-files-list');
+const outboundThumbnailGrid = document.getElementById('outbound-thumbnail-grid');
+const outboundQrContainer = document.getElementById('outbound-qr-container');
 
 const dragOverlay = document.getElementById('drag-overlay');
 const idleTimeoutFill = document.getElementById('idle-timeout-fill');
@@ -56,15 +53,35 @@ const timeoutWarningBanner = document.getElementById('timeout-warning-banner');
 const printIframe = document.getElementById('print-iframe');
 
 /**
- * Persist active session to survive page reloads.
+ * Fetch public config and instantiate Supabase client
+ */
+async function getSupabaseClient() {
+  if (supabaseClient) return supabaseClient;
+  try {
+    const res = await fetch('/api/config');
+    if (res.ok) {
+      const { supabaseUrl, supabaseAnonKey } = await res.json();
+      if (supabaseUrl && supabaseAnonKey) {
+        supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
+          auth: { persistSession: false },
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('[kiosk] Could not fetch Supabase config:', err);
+  }
+  return supabaseClient;
+}
+
+/**
+ * Persist active session across browser refreshes.
  */
 function getStoredSession() {
   try {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    const now = Date.now();
-    if (now >= data.expiresAt) {
+    if (Date.now() >= data.expiresAt) {
       localStorage.removeItem(SESSION_STORAGE_KEY);
       return null;
     }
@@ -90,9 +107,6 @@ function clearStoredSession() {
   } catch (e) {}
 }
 
-/**
- * XSS-safe text escaping
- */
 function escapeHtml(str) {
   if (!str) return '';
   const div = document.createElement('div');
@@ -100,9 +114,6 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-/**
- * Format bytes into human-readable string.
- */
 function formatBytes(bytes) {
   if (!bytes || bytes === 0) return '0 B';
   const k = 1024;
@@ -111,47 +122,41 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-/**
- * Identify file classification for visual badges.
- */
-function getFileTypeInfo(filename = '') {
+function getFileIcon(filename = '') {
   const ext = filename.split('.').pop().toLowerCase();
-  if (['pdf'].includes(ext)) return { type: 'pdf', label: 'PDF' };
-  if (['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic'].includes(ext)) return { type: 'img', label: 'IMG' };
-  if (['doc', 'docx', 'odt'].includes(ext)) return { type: 'doc', label: 'DOC' };
-  if (['xls', 'xlsx', 'csv'].includes(ext)) return { type: 'sheet', label: 'SHEET' };
-  if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return { type: 'zip', label: 'ZIP' };
-  return { type: 'generic', label: ext ? ext.substring(0, 4).toUpperCase() : 'FILE' };
+  if (['pdf'].includes(ext)) return '📎';
+  if (['ppt', 'pptx', 'key'].includes(ext)) return '📊';
+  if (['doc', 'docx', 'odt', 'txt', 'rtf'].includes(ext)) return '📄';
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return '📈';
+  if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return '🗜️';
+  if (['mp3', 'wav', 'm4a', 'aac'].includes(ext)) return '🎙️';
+  return '📎';
 }
 
-/**
- * Update the header status indicator without re-rendering header.
- */
+function isImageFile(filename = '') {
+  const ext = filename.split('.').pop().toLowerCase();
+  return ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'svg'].includes(ext);
+}
+
 function setHeaderStatus(type, text) {
   if (!statusDot || !statusLabel) return;
   statusDot.className = 'status-dot ' + type;
   statusLabel.textContent = text;
 }
 
-/**
- * Switch view state with smooth in-place CSS animations.
- */
 function setViewState(state) {
   currentState = state;
-  viewIdle.classList.remove('active');
+  viewReceive.classList.remove('active');
   viewReceived.classList.remove('active');
   viewSending.classList.remove('active');
 
-  tabReceive.classList.toggle('active', state === 'idle' || state === 'received');
-  tabSend.classList.toggle('active', state === 'sending');
-
-  if (state === 'idle') {
-    viewIdle.classList.add('active');
-    setHeaderStatus('online', 'Ready');
+  if (state === 'receive') {
+    viewReceive.classList.add('active');
+    setHeaderStatus('online', 'Ready for Files');
     startIdleTimer();
   } else if (state === 'received') {
     viewReceived.classList.add('active');
-    setHeaderStatus('online', 'Files Received');
+    setHeaderStatus('online', 'Documents Ready');
     startIdleTimer();
   } else if (state === 'sending') {
     viewSending.classList.add('active');
@@ -160,9 +165,6 @@ function setViewState(state) {
   }
 }
 
-/**
- * Render QR Code using locally bundled QRCode library.
- */
 function renderQrCode(canvas, text) {
   if (!canvas || !text) return;
   if (window.QRCode && typeof window.QRCode.toCanvas === 'function') {
@@ -178,13 +180,99 @@ function renderQrCode(canvas, text) {
       console.error('Failed to draw QR code:', e);
     }
   } else {
-    setTimeout(() => renderQrCode(canvas, text), 200);
+    setTimeout(() => renderQrCode(canvas, text), 150);
   }
 }
 
 /**
- * Initialize or restore a session across page reloads.
+ * Real-Time Supabase WebSocket Listener
  */
+async function setupRealtimeListener(code) {
+  if (realtimeChannel) {
+    try { realtimeChannel.unsubscribe(); } catch (e) {}
+    realtimeChannel = null;
+  }
+
+  const client = await getSupabaseClient();
+  if (!client) {
+    console.log('[kiosk] Supabase client not ready; relying on gentle poll fallback');
+    return;
+  }
+
+  try {
+    realtimeChannel = client
+      .channel(`session:${code}`)
+      .on('broadcast', { event: 'files_uploaded' }, (payload) => {
+        const files = payload?.payload?.files;
+        if (Array.isArray(files) && files.length > 0) {
+          currentFiles = files;
+          onFilesReceived(currentFiles);
+        }
+      })
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'sessions',
+        filter: `code=eq.${code}`
+      }, (payload) => {
+        const session = payload.new;
+        if (session && session.status === 'uploaded' && Array.isArray(session.files) && session.files.length > 0) {
+          currentFiles = session.files;
+          onFilesReceived(session.files);
+        }
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          networkBanner.classList.remove('active');
+          setHeaderStatus('online', 'Live Synchronized');
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setHeaderStatus('warning', 'Reconnecting...');
+        }
+      });
+  } catch (e) {
+    console.warn('[kiosk] Realtime subscribe error:', e);
+  }
+}
+
+/**
+ * Gentle 4-second Polling Fallback (Uses Postgres/REST, ZERO storage ops)
+ */
+function startPollingFallback() {
+  stopPollingFallback();
+  pollInterval = setInterval(async () => {
+    if (!currentCode) return;
+    try {
+      const res = await fetch(`/api/status?code=${currentCode}&t=${Date.now()}`);
+      if (!res.ok) {
+        if (res.status === 404 && currentState === 'receive') {
+          // Wait for grace period before regenerating
+        }
+        return;
+      }
+      const data = await res.json();
+      const files = Array.isArray(data.files) && data.files.length > 0
+        ? data.files
+        : data.file ? [data.file] : [];
+
+      if (data.status === 'uploaded' && files.length > 0) {
+        if (JSON.stringify(files) !== JSON.stringify(currentFiles)) {
+          currentFiles = files;
+          onFilesReceived(files);
+        }
+      }
+    } catch (e) {
+      setHeaderStatus('warning', 'Wi-Fi Reconnecting...');
+    }
+  }, 4000);
+}
+
+function stopPollingFallback() {
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
+}
+
 async function initSession(forceNew = false) {
   if (!forceNew) {
     const stored = getStoredSession();
@@ -197,7 +285,9 @@ async function initSession(forceNew = false) {
       const mobileUrl = `${window.location.origin}/mobile?code=${currentCode}`;
       renderQrCode(qrCanvasReceive, mobileUrl);
 
-      // Verify status with server smoothly
+      setupRealtimeListener(currentCode);
+      startPollingFallback();
+
       try {
         const res = await fetch(`/api/status?code=${currentCode}&t=${Date.now()}`);
         if (res.ok) {
@@ -209,23 +299,16 @@ async function initSession(forceNew = false) {
           if (data.status === 'uploaded' && files.length > 0) {
             currentFiles = files;
             onFilesReceived(files);
-            startPolling();
             return;
           }
-          setViewState('idle');
-          startPolling();
-          return;
         }
-      } catch (e) {
-        // network issue, continue with stored code
-        setViewState('idle');
-        startPolling();
-        return;
-      }
+      } catch (e) {}
+
+      setViewState('receive');
+      return;
     }
   }
 
-  // Generate brand new session
   try {
     setHeaderStatus('warning', 'Connecting...');
     const res = await fetch('/api/session', {
@@ -234,139 +317,70 @@ async function initSession(forceNew = false) {
       body: JSON.stringify({ mode: 'receive' }),
     });
 
-    if (!res.ok) {
-      throw new Error(`Session creation failed: HTTP ${res.status}`);
-    }
-
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    currentCode = data.code;
-    consecutive404Count = 0;
-    currentFiles = [];
-    idleTimeRemaining = TOTAL_IDLE_SECONDS;
-    saveStoredSession(currentCode, idleTimeRemaining);
 
+    currentCode = data.code;
     displayCode.textContent = currentCode;
+    saveStoredSession(currentCode, TOTAL_IDLE_SECONDS);
 
     const mobileUrl = `${window.location.origin}/mobile?code=${currentCode}`;
     renderQrCode(qrCanvasReceive, mobileUrl);
 
-    setViewState('idle');
-    startPolling();
+    setupRealtimeListener(currentCode);
+    startPollingFallback();
+    setViewState('receive');
+    setHeaderStatus('online', 'Ready for Files');
   } catch (err) {
-    console.error('Failed to init session:', err);
-    setHeaderStatus('error', 'Error');
-    showNetworkBanner('⚠️ Failed to generate session. Checking connection...');
-    setTimeout(() => initSession(true), 4000);
+    console.error('Failed to initialize session:', err);
+    setHeaderStatus('error', 'Connection Error');
+    setTimeout(() => initSession(true), 3000);
   }
 }
 
 /**
- * Polling loop to check for incoming uploads smoothly in-place.
- */
-function startPolling() {
-  stopPolling();
-  pollInterval = setInterval(async () => {
-    if (!currentCode || currentState === 'received') return;
-
-    try {
-      const res = await fetch(`/api/status?code=${currentCode}&t=${Date.now()}`);
-
-      if (!res.ok) {
-        if (res.status === 404) {
-          consecutive404Count++;
-          if (consecutive404Count > 25) {
-            console.warn('Persistent 404. Re-initializing session...');
-            initSession(true);
-          }
-          return;
-        }
-        throw new Error(`Status check HTTP ${res.status}`);
-      }
-
-      consecutive404Count = 0;
-      const contentType = res.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        handleCaptivePortal();
-        return;
-      }
-
-      const data = await res.json();
-      hideNetworkBanner();
-
-      const files = Array.isArray(data.files) && data.files.length > 0
-        ? data.files
-        : data.file ? [data.file] : [];
-
-      if (data.status === 'uploaded' && files.length > 0) {
-        currentFiles = files;
-        onFilesReceived(files);
-      }
-    } catch (err) {
-      console.warn('Polling network drop:', err.message);
-      handleNetworkDrop();
-    }
-  }, 2000);
-}
-
-function stopPolling() {
-  if (pollInterval) {
-    clearInterval(pollInterval);
-    pollInterval = null;
-  }
-}
-
-/**
- * In-place non-refresh DOM update when files arrive.
+ * EXACT REFERENCE IMAGE 2 RENDERING FOR RECEIVED FILES
  */
 function onFilesReceived(files) {
-  receivedCountChip.textContent = `${files.length} ${files.length === 1 ? 'file' : 'files'}`;
   receivedFilesList.innerHTML = '';
-  receivedThumbnailStrip.innerHTML = '';
-  let hasImages = false;
+  receivedThumbnailGrid.innerHTML = '';
+  let imageCount = 0;
 
   files.forEach((file, idx) => {
-    const fileInfo = getFileTypeInfo(file.name);
-    const item = document.createElement('div');
-    item.className = 'attachment-item';
-
-    const isImage = fileInfo.type === 'img';
-    const isPrintable = isImage || fileInfo.type === 'pdf';
+    const isImg = isImageFile(file.name);
     const safeName = escapeHtml(file.name);
 
-    item.innerHTML = `
-      <div class="attachment-left">
-        <div class="file-type-icon ${fileInfo.type}">${escapeHtml(fileInfo.label)}</div>
-        <div class="attachment-name-meta">
-          <span class="attachment-name" title="${safeName}">${safeName}</span>
-          <span class="attachment-size">${formatBytes(file.size)}</span>
-        </div>
+    if (isImg && file.url) {
+      imageCount++;
+      const thumb = document.createElement('div');
+      thumb.className = 'ref-thumb-card';
+      thumb.innerHTML = `
+        <img src="${file.url}" alt="${safeName}" class="ref-thumb-img" loading="lazy">
+        <span class="ref-thumb-size">${formatBytes(file.size)}</span>
+      `;
+      receivedThumbnailGrid.appendChild(thumb);
+    }
+
+    const pill = document.createElement('div');
+    pill.className = 'ref-pill-row';
+    const icon = getFileIcon(file.name);
+
+    pill.innerHTML = `
+      <div class="ref-pill-left">
+        <span class="ref-pill-icon">${icon}</span>
+        <span class="ref-pill-name" title="${safeName}">${safeName}</span>
       </div>
-      <div class="attachment-actions">
-        ${isPrintable ? `<button class="btn-icon-action btn-print-single" data-index="${idx}" type="button">🖨️ Print</button>` : ''}
-        <button class="btn-icon-action btn-download-single" data-index="${idx}" type="button">💾 Save</button>
+      <div class="ref-pill-right">
+        <span class="ref-pill-size">${formatBytes(file.size)}</span>
+        <button class="ref-pill-action btn-print-single" data-index="${idx}" title="Print" type="button">🖨️</button>
+        <button class="ref-pill-action btn-download-single" data-index="${idx}" title="Save" type="button">↓</button>
       </div>
     `;
 
-    receivedFilesList.appendChild(item);
-
-    if (isImage && file.url) {
-      hasImages = true;
-      const thumb = document.createElement('div');
-      thumb.className = 'thumbnail-card';
-      const img = document.createElement('img');
-      img.src = file.url;
-      img.alt = file.name;
-      img.loading = 'lazy';
-      const badge = document.createElement('span');
-      badge.className = 'thumbnail-badge';
-      badge.textContent = formatBytes(file.size);
-      thumb.appendChild(img);
-      thumb.appendChild(badge);
-      receivedThumbnailStrip.appendChild(thumb);
-    }
+    receivedFilesList.appendChild(pill);
   });
 
-  receivedThumbnailStrip.style.display = hasImages ? 'flex' : 'none';
+  receivedThumbnailGrid.style.display = imageCount > 0 ? 'flex' : 'none';
 
   receivedFilesList.querySelectorAll('.btn-print-single').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -387,9 +401,6 @@ function onFilesReceived(files) {
   setViewState('received');
 }
 
-/**
- * Print a single file.
- */
 function printFile(file) {
   if (!file || !file.url) return;
   resetIdleTimer();
@@ -413,9 +424,6 @@ function printFile(file) {
   }
 }
 
-/**
- * Download a single file natively via ObjectURL.
- */
 async function downloadFile(file) {
   if (!file || !file.url) return;
   resetIdleTimer();
@@ -436,9 +444,6 @@ async function downloadFile(file) {
   }
 }
 
-/**
- * Print All Files sequentially.
- */
 btnPrintAll.addEventListener('click', () => {
   if (!currentFiles || currentFiles.length === 0) return;
   resetIdleTimer();
@@ -447,9 +452,6 @@ btnPrintAll.addEventListener('click', () => {
   });
 });
 
-/**
- * Download All Files.
- */
 btnDownloadAll.addEventListener('click', () => {
   if (!currentFiles || currentFiles.length === 0) return;
   resetIdleTimer();
@@ -458,32 +460,34 @@ btnDownloadAll.addEventListener('click', () => {
   });
 });
 
-/**
- * Reset / Finish session in-place without page reload.
- */
 async function resetSession() {
   stopIdleTimer();
-  stopPolling();
+  stopPollingFallback();
+  if (realtimeChannel) {
+    try { realtimeChannel.unsubscribe(); } catch (e) {}
+    realtimeChannel = null;
+  }
 
   const oldCode = currentCode;
   clearStoredSession();
   currentFiles = [];
+  stagedOutboundFiles = [];
   currentCode = null;
 
-  // Clear in-place DOM
   receivedFilesList.innerHTML = '';
-  receivedThumbnailStrip.innerHTML = '';
-  receivedThumbnailStrip.style.display = 'none';
+  receivedThumbnailGrid.innerHTML = '';
+  receivedThumbnailGrid.style.display = 'none';
 
   if (oldCode) {
     try {
-      await fetch(`/api/cleanup?code=${oldCode}`, { method: 'DELETE' });
-    } catch (e) {
-      console.warn('Error during blob cleanup:', e);
-    }
+      await fetch('/api/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: oldCode }),
+      });
+    } catch (e) {}
   }
 
-  // Smoothly initialize new session in-place
   initSession(true);
 }
 
@@ -491,37 +495,19 @@ btnResetReceived.addEventListener('click', resetSession);
 btnManualRefresh.addEventListener('click', resetSession);
 
 /**
- * Tab switching (Reference Image 1).
+ * Transforming Center Hub Transitions
  */
-tabReceive.addEventListener('click', () => {
-  setViewState(currentFiles.length > 0 ? 'received' : 'idle');
-});
-
-tabSend.addEventListener('click', () => {
+btnTriggerSendMode.addEventListener('click', () => {
   setViewState('sending');
-  desktopDropzone.style.display = 'block';
   outboundQrContainer.style.display = 'none';
+  outboundAttachmentsContainer.style.display = stagedOutboundFiles.length > 0 ? 'block' : 'none';
 });
 
 btnBackToReceive.addEventListener('click', () => {
-  setViewState(currentFiles.length > 0 ? 'received' : 'idle');
+  setViewState(currentFiles.length > 0 ? 'received' : 'receive');
 });
 
-// Keyboard shortcuts (1: Receive, 2: Send)
-window.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-  if (e.key === '1') tabReceive.click();
-  if (e.key === '2') tabSend.click();
-});
-
-/**
- * Outbound Mode (Desktop -> Phone).
- */
 desktopDropzone.addEventListener('click', () => desktopFileInput.click());
-desktopDropzone.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' || e.key === ' ') desktopFileInput.click();
-});
-
 desktopFileInput.addEventListener('change', (e) => {
   if (e.target.files && e.target.files.length > 0) {
     handleDesktopFilesUpload(Array.from(e.target.files));
@@ -531,38 +517,41 @@ desktopFileInput.addEventListener('change', (e) => {
 async function handleDesktopFilesUpload(files) {
   if (!files || files.length === 0) return;
 
-  if (files.length > 10) {
-    alert('Please select a maximum of 10 files at once.');
-    return;
-  }
-
   for (const f of files) {
     if (f.size > 50 * 1024 * 1024) {
-      alert(`File "${f.name}" exceeds the 50MB limit (${formatBytes(f.size)}). Please choose smaller files.`);
+      alert(`"${f.name}" exceeds the 50MB limit.`);
       return;
     }
   }
 
-  desktopDropzone.innerHTML = `<div class="dropzone-title">⏳ Uploading ${files.length} ${files.length === 1 ? 'file' : 'files'}...</div>`;
-  setHeaderStatus('warning', 'Uploading...');
+  setHeaderStatus('warning', 'Uploading to Supabase...');
+  const client = await getSupabaseClient();
+  if (!client) {
+    alert('Supabase is not configured yet. Please set SUPABASE_URL and SUPABASE_ANON_KEY.');
+    setHeaderStatus('error', 'Supabase Not Configured');
+    return;
+  }
 
   const uploadedFiles = [];
 
   try {
     for (const file of files) {
-      const newBlob = await upload(file.name, file, {
-        access: 'public',
-        handleUploadUrl: '/api/upload',
-        clientPayload: JSON.stringify({
-          code: currentCode,
-          fileName: file.name,
-          mode: 'send',
-        }),
-      });
+      const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const storagePath = `${currentCode}/${Date.now()}_${cleanName}`;
+
+      const { data, error } = await client.storage
+        .from('documents')
+        .upload(storagePath, file, { cacheControl: '3600', upsert: true });
+
+      if (error) throw error;
+
+      const { data: publicData } = client.storage
+        .from('documents')
+        .getPublicUrl(storagePath);
 
       uploadedFiles.push({
-        url: newBlob.url,
-        pathname: newBlob.pathname,
+        url: publicData.publicUrl,
+        storagePath: storagePath,
         name: file.name,
         size: file.size,
         contentType: file.type,
@@ -579,41 +568,111 @@ async function handleDesktopFilesUpload(files) {
       }),
     });
 
-    desktopDropzone.style.display = 'none';
+    // Realtime broadcast to mobile
+    if (realtimeChannel) {
+      try {
+        realtimeChannel.send({
+          type: 'broadcast',
+          event: 'files_uploaded',
+          payload: { code: currentCode, files: uploadedFiles },
+        });
+      } catch (e) {}
+    }
+
+    stagedOutboundFiles = [...stagedOutboundFiles, ...uploadedFiles];
+    renderOutboundAttachments();
+
     outboundQrContainer.style.display = 'block';
-    outboundCountChip.textContent = `${uploadedFiles.length} files`;
-    outboundFilesList.innerHTML = '';
-
-    uploadedFiles.forEach(f => {
-      const info = getFileTypeInfo(f.name);
-      const row = document.createElement('div');
-      row.className = 'attachment-item';
-      row.innerHTML = `
-        <div class="attachment-left">
-          <div class="file-type-icon ${info.type}">${escapeHtml(info.label)}</div>
-          <div class="attachment-name-meta">
-            <span class="attachment-name">${escapeHtml(f.name)}</span>
-            <span class="attachment-size">${formatBytes(f.size)}</span>
-          </div>
-        </div>
-      `;
-      outboundFilesList.appendChild(row);
-    });
-
     const downloadUrl = `${window.location.origin}/mobile?action=download&code=${currentCode}`;
     renderQrCode(qrCanvasSend, downloadUrl);
 
-    setHeaderStatus('online', 'Ready for Phone Download');
+    setHeaderStatus('online', 'Ready for Mobile Download');
     startIdleTimer();
   } catch (err) {
-    console.error('Desktop upload failed:', err);
-    desktopDropzone.innerHTML = `<div class="dropzone-title" style="color: #e11d48;">❌ Upload failed: ${escapeHtml(err.message)}. Click to retry.</div>`;
+    alert(`Upload failed: ${err.message}`);
     setHeaderStatus('error', 'Upload Error');
   }
 }
 
 /**
- * Drag and drop anywhere on screen.
+ * EXACT REFERENCE IMAGE 2 RENDERING FOR OUTBOUND STAGED FILES
+ */
+function renderOutboundAttachments() {
+  if (stagedOutboundFiles.length === 0) {
+    outboundAttachmentsContainer.style.display = 'none';
+    return;
+  }
+
+  outboundAttachmentsContainer.style.display = 'block';
+  outboundFilesList.innerHTML = '';
+  outboundThumbnailGrid.innerHTML = '';
+  let imageCount = 0;
+
+  stagedOutboundFiles.forEach((file, idx) => {
+    const isImg = isImageFile(file.name);
+    const safeName = escapeHtml(file.name);
+
+    if (isImg && file.url) {
+      imageCount++;
+      const thumb = document.createElement('div');
+      thumb.className = 'ref-thumb-card';
+      thumb.innerHTML = `
+        <img src="${file.url}" alt="${safeName}" class="ref-thumb-img">
+        <button class="ref-thumb-close" data-index="${idx}" title="Remove">✕</button>
+        <span class="ref-thumb-size">${formatBytes(file.size)}</span>
+      `;
+      outboundThumbnailGrid.appendChild(thumb);
+    }
+
+    const pill = document.createElement('div');
+    pill.className = 'ref-pill-row';
+    const icon = getFileIcon(file.name);
+
+    pill.innerHTML = `
+      <div class="ref-pill-left">
+        <span class="ref-pill-icon">${icon}</span>
+        <span class="ref-pill-name" title="${safeName}">${safeName}</span>
+      </div>
+      <div class="ref-pill-right">
+        <span class="ref-pill-size">${formatBytes(file.size)}</span>
+        <button class="ref-pill-remove" data-index="${idx}" title="Remove" type="button">✕</button>
+      </div>
+    `;
+
+    outboundFilesList.appendChild(pill);
+  });
+
+  // Append '+' card matching Reference Image 2
+  const addCard = document.createElement('div');
+  addCard.className = 'ref-add-card';
+  addCard.innerHTML = '+';
+  addCard.title = 'Add more files';
+  addCard.addEventListener('click', () => desktopFileInput.click());
+  outboundThumbnailGrid.appendChild(addCard);
+
+  outboundThumbnailGrid.style.display = 'flex';
+
+  outboundFilesList.querySelectorAll('.ref-pill-remove').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.getAttribute('data-index'), 10);
+      stagedOutboundFiles.splice(idx, 1);
+      renderOutboundAttachments();
+    });
+  });
+
+  outboundThumbnailGrid.querySelectorAll('.ref-thumb-close').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.getAttribute('data-index'), 10);
+      stagedOutboundFiles.splice(idx, 1);
+      renderOutboundAttachments();
+    });
+  });
+}
+
+/**
+ * Drag & drop anywhere transforms to Send mode
  */
 let dragCounter = 0;
 
@@ -640,13 +699,13 @@ window.addEventListener('drop', (e) => {
   dragOverlay.classList.remove('active');
 
   if (e.dataTransfer && e.dataTransfer.files.length > 0) {
-    tabSend.click();
+    setViewState('sending');
     handleDesktopFilesUpload(Array.from(e.dataTransfer.files));
   }
 });
 
 /**
- * 3-Minute (180s) Inactivity Timer.
+ * Inactivity Timer (Only resets after 3 minutes / completed action / manual)
  */
 function startIdleTimer() {
   stopIdleTimer();
@@ -658,7 +717,6 @@ function startIdleTimer() {
     updateIdleDisplay();
 
     if (idleTimeRemaining <= 0) {
-      console.log('3-minute inactivity reached: resetting session.');
       resetSession();
     }
   }, 1000);
@@ -680,7 +738,7 @@ function resetIdleTimer() {
 
 function updateIdleDisplay() {
   const percentage = (idleTimeRemaining / TOTAL_IDLE_SECONDS) * 100;
-  
+
   if (idleTimeoutFill) {
     idleTimeoutFill.style.width = `${percentage}%`;
     idleTimeoutLabel.textContent = `Session active (${idleTimeRemaining}s inactivity reset)`;
@@ -701,68 +759,14 @@ function updateIdleDisplay() {
   }
 }
 
-// User interactions reset the 180s countdown
 window.addEventListener('click', resetIdleTimer);
 window.addEventListener('touchstart', resetIdleTimer);
 window.addEventListener('mousemove', resetIdleTimer);
 
-/**
- * Network Connectivity & Captive Portal Monitoring.
- */
-function showNetworkBanner(message, isError = false) {
-  networkBannerText.textContent = message;
-  networkBanner.className = isError ? 'active error' : 'active';
-  setHeaderStatus(isError ? 'error' : 'warning', 'Offline / Reconnecting');
-}
-
-function hideNetworkBanner() {
-  if (networkBanner.classList.contains('active')) {
-    networkBanner.classList.remove('active');
-    if (currentState === 'idle') setHeaderStatus('online', 'Ready');
-    else if (currentState === 'received') setHeaderStatus('online', 'Files Received');
-    else if (currentState === 'sending') setHeaderStatus('online', 'Send Mode');
-  }
-}
-
-function handleNetworkDrop() {
-  isOffline = true;
-  showNetworkBanner('⚠️ Wi-Fi Disconnected / Packet Loss. Attempting to reconnect...');
-}
-
-function handleCaptivePortal() {
-  showNetworkBanner('⚠️ Wi-Fi Login Required (Captive Portal detected). Please log in to the network.', true);
-}
-
-window.addEventListener('offline', handleNetworkDrop);
+window.addEventListener('offline', () => setHeaderStatus('warning', 'Wi-Fi Reconnecting...'));
 window.addEventListener('online', () => {
-  isOffline = false;
-  hideNetworkBanner();
-  if (currentCode) {
-    fetch(`/api/status?code=${currentCode}`).then(() => hideNetworkBanner()).catch(() => {});
-  }
+  if (currentCode) setupRealtimeListener(currentCode);
 });
 
-// Periodic ping to verify connectivity
-pingInterval = setInterval(async () => {
-  try {
-    const res = await fetch('/api/ping');
-    if (!res.ok) {
-      handleCaptivePortal();
-      return;
-    }
-    const ct = res.headers.get('content-type') || '';
-    if (!ct.includes('application/json')) {
-      handleCaptivePortal();
-      return;
-    }
-    if (isOffline) {
-      isOffline = false;
-      hideNetworkBanner();
-    }
-  } catch (e) {
-    // Network drop caught in fetch
-  }
-}, 10000);
-
-// Initialize or resume on page load
+// Initialize on page load
 initSession(false);

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <meta name="theme-color" content="#f4f5f7">
+  <meta name="theme-color" content="#f2f3f5">
   <link rel="manifest" href="/manifest.json">
   <title>Kiosk Companion</title>
   <link rel="stylesheet" href="/css/mobile.css">
@@ -27,23 +27,23 @@
     <section class="mobile-card" id="card-standard">
       <div class="card-top-content">
         <h2 class="card-heading">Send to Kiosk</h2>
-        <p class="card-subtitle">Choose one or more documents or images to send directly to the kiosk screen.</p>
+        <p class="card-subtitle">Choose documents, presentations, or images to send directly to the kiosk screen.</p>
 
         <input type="file" id="file-input-standard" multiple style="display: none;">
 
-        <div class="mobile-dropzone" id="dropzone-standard" role="button" tabindex="0">
-          <div class="dropzone-inner-icon" aria-hidden="true">📄</div>
-          <div class="dropzone-inner-title">Tap to Select Files</div>
-          <div class="dropzone-inner-sub">PDF, Word, Images, Zip • Max 50MB per file</div>
+        <!-- Exact Reference Image 2 Upload Box -->
+        <div class="ref-upload-outer">
+          <div class="ref-upload-dashed" id="dropzone-standard" role="button" tabindex="0">
+            <div class="ref-upload-title">Drag and drop files here or click to browse.</div>
+            <div class="ref-upload-sub">Maximum 50MB File Size • PPT, PDF, DOC, XLS, Images, Zip</div>
+          </div>
         </div>
 
-        <!-- Selected files attachment list (Image 2 style) -->
-        <div class="mobile-attachment-container" id="attachment-container-standard" style="display: none;">
-          <div class="mobile-attachment-header">
-            <span>Selected Attachments</span>
-            <span id="standard-count-badge">0 files</span>
-          </div>
-          <div class="mobile-attachment-list" id="attachment-list-standard"></div>
+        <!-- Exact Reference Image 2 Attachments List -->
+        <div class="ref-attachments-container" id="attachment-container-standard" style="display: none;">
+          <div class="ref-attachments-title">Attachments</div>
+          <div class="ref-attachment-list" id="attachment-list-standard"></div>
+          <div class="ref-thumbnail-grid" id="thumbnail-grid-standard"></div>
         </div>
 
         <div class="mobile-progress-wrapper" id="progress-standard">
@@ -71,18 +71,18 @@
 
           <input type="file" id="file-input-preupload" multiple style="display: none;">
 
-          <div class="mobile-dropzone" id="dropzone-preupload" role="button" tabindex="0">
-            <div class="dropzone-inner-icon" aria-hidden="true">📁</div>
-            <div class="dropzone-inner-title">Tap to Choose Files</div>
-            <div class="dropzone-inner-sub">Select multiple documents • Max 50MB per file</div>
+          <!-- Exact Reference Upload Box -->
+          <div class="ref-upload-outer">
+            <div class="ref-upload-dashed" id="dropzone-preupload" role="button" tabindex="0">
+              <div class="ref-upload-title">Drag and drop files here or click to browse.</div>
+              <div class="ref-upload-sub">Maximum 50MB File Size • Multiple files supported</div>
+            </div>
           </div>
 
-          <div class="mobile-attachment-container" id="attachment-container-preupload" style="display: none;">
-            <div class="mobile-attachment-header">
-              <span>Selected Files</span>
-              <span id="preupload-count-badge">0 files</span>
-            </div>
-            <div class="mobile-attachment-list" id="attachment-list-preupload"></div>
+          <div class="ref-attachments-container" id="attachment-container-preupload" style="display: none;">
+            <div class="ref-attachments-title">Attachments</div>
+            <div class="ref-attachment-list" id="attachment-list-preupload"></div>
+            <div class="ref-thumbnail-grid" id="thumbnail-grid-preupload"></div>
           </div>
 
           <div class="mobile-progress-wrapper" id="progress-preupload">
@@ -98,7 +98,7 @@
           <h2 class="card-heading">Connect to Kiosk</h2>
           <p class="card-subtitle">Scan the QR code on the kiosk screen or enter the 4-digit code shown.</p>
 
-          <button class="btn-mobile-secondary" id="btn-scan-qr" type="button" style="margin-bottom: 8px;">
+          <button class="btn-mobile-secondary" id="btn-scan-qr" type="button" style="margin-bottom: 6px;">
             <span>📷 Scan Kiosk QR Code</span>
           </button>
 
@@ -129,24 +129,21 @@
       </div>
     </section>
 
-    <!-- FLOW C: Download Flow (Kiosk -> Phone) -->
+    <!-- FLOW C: Download Flow (Kiosk -> Phone Outbound) -->
     <section class="mobile-card" id="card-download">
       <div class="card-top-content">
         <h2 class="card-heading">Download to Phone</h2>
         <p class="card-subtitle">The kiosk station has sent the following files to your phone.</p>
 
-        <div class="mobile-attachment-container" style="display: flex;">
-          <div class="mobile-attachment-header">
-            <span>Available Files</span>
-            <span id="download-count-badge">0 files</span>
-          </div>
-          <div class="mobile-attachment-list" id="download-files-list"></div>
+        <div class="ref-attachments-container" style="display: flex;">
+          <div class="ref-attachments-title">Attachments</div>
+          <div class="ref-attachment-list" id="download-files-list"></div>
         </div>
       </div>
 
       <div class="card-bottom-action">
         <button class="btn-mobile-primary" id="btn-download-all-mobile" type="button">
-          <span>💾 Download All Files</span>
+          <span>💾 Save All Attachments</span>
         </button>
       </div>
     </section>
@@ -154,9 +151,9 @@
     <!-- FLOW D: Upload Success Screen -->
     <section class="mobile-card" id="card-success">
       <div class="card-top-content" style="align-items: center; justify-content: center; text-align: center;">
-        <div style="font-size: 3.2rem; margin-bottom: 8px;" aria-hidden="true">🎉</div>
+        <div style="font-size: 3rem; margin-bottom: 6px;" aria-hidden="true">🎉</div>
         <h2 class="card-heading">Sent to Kiosk!</h2>
-        <p class="card-subtitle" style="margin-top: 6px;">Your documents have been received by the kiosk screen. You can now print or download them at the station.</p>
+        <p class="card-subtitle" style="margin-top: 4px;">Your files have been received by the kiosk screen. You can now print or save them directly at the station.</p>
       </div>
 
       <div class="card-bottom-action">

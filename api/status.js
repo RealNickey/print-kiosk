@@ -1,7 +1,6 @@
-import { isValidCode, getSession } from './_lib/blob-store.js';
+import { isValidCode, getSession } from './_lib/supabase.js';
 
 export default async function handler(req, res) {
-  // Aggressive no-cache headers for polling
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -34,9 +33,7 @@ export default async function handler(req, res) {
     }
 
     const { session } = sessionWrap;
-    const files = Array.isArray(session.files)
-      ? session.files
-      : session.file ? [session.file] : [];
+    const files = Array.isArray(session.files) ? session.files : [];
 
     return res.status(200).json({
       code: session.code,
@@ -44,8 +41,9 @@ export default async function handler(req, res) {
       mode: session.mode || 'receive',
       files,
       file: files[0] || null,
-      createdAt: session.createdAt,
-      updatedAt: session.updatedAt,
+      createdAt: session.created_at,
+      updatedAt: session.updated_at,
+      expiresAt: session.expires_at,
     });
   } catch (error) {
     console.error(`[api/status] Error checking session ${code}:`, error);

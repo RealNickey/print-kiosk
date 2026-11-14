@@ -1,4 +1,4 @@
-import { upload } from '/js/vendor/blob-client.js';
+import { createClient } from '/js/vendor/supabase.min.js';
 
 // Session storage keys
 const MOBILE_CODE_KEY = 'kiosk_mobile_code';
@@ -10,6 +10,7 @@ let currentJobId = null;
 let stagedFilesStandard = [];
 let stagedFilesPreupload = [];
 let html5QrCodeScanner = null;
+let supabaseClient = null;
 
 // DOM Elements
 const badgeKioskCode = document.getElementById('badge-kiosk-code');
@@ -20,7 +21,7 @@ const fileInputStandard = document.getElementById('file-input-standard');
 const dropzoneStandard = document.getElementById('dropzone-standard');
 const attachmentContainerStandard = document.getElementById('attachment-container-standard');
 const attachmentListStandard = document.getElementById('attachment-list-standard');
-const standardCountBadge = document.getElementById('standard-count-badge');
+const thumbnailGridStandard = document.getElementById('thumbnail-grid-standard');
 const progressStandard = document.getElementById('progress-standard');
 const progressFillStandard = document.getElementById('progress-fill-standard');
 const progressTextStandard = document.getElementById('progress-text-standard');
@@ -34,7 +35,7 @@ const fileInputPreupload = document.getElementById('file-input-preupload');
 const dropzonePreupload = document.getElementById('dropzone-preupload');
 const attachmentContainerPreupload = document.getElementById('attachment-container-preupload');
 const attachmentListPreupload = document.getElementById('attachment-list-preupload');
-const preuploadCountBadge = document.getElementById('preupload-count-badge');
+const thumbnailGridPreupload = document.getElementById('thumbnail-grid-preupload');
 const progressPreupload = document.getElementById('progress-preupload');
 const progressFillPreupload = document.getElementById('progress-fill-preupload');
 const progressTextPreupload = document.getElementById('progress-text-preupload');
@@ -45,7 +46,6 @@ const btnBindCode = document.getElementById('btn-bind-code');
 
 // Flow C
 const cardDownload = document.getElementById('card-download');
-const downloadCountBadge = document.getElementById('download-count-badge');
 const downloadFilesList = document.getElementById('download-files-list');
 const btnDownloadAllMobile = document.getElementById('btn-download-all-mobile');
 
@@ -57,12 +57,27 @@ const btnSendAnother = document.getElementById('btn-send-another');
 const qrScannerModal = document.getElementById('qr-scanner-modal');
 const btnCancelScanner = document.getElementById('btn-cancel-scanner');
 
-// Dangerous extensions pattern
+// Dangerous extensions
 const DANGEROUS_EXTS = /\.(exe|bat|cmd|sh|js|mjs|cjs|vbs|ps1|scr|msi|jar|apk|com|pif|hta|html|htm|php|cgi)$/i;
 
-/**
- * XSS-safe text escaping
- */
+async function getSupabaseClient() {
+  if (supabaseClient) return supabaseClient;
+  try {
+    const res = await fetch('/api/config');
+    if (res.ok) {
+      const { supabaseUrl, supabaseAnonKey } = await res.json();
+      if (supabaseUrl && supabaseAnonKey) {
+        supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
+          auth: { persistSession: false },
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('[mobile] Could not fetch Supabase config:', err);
+  }
+  return supabaseClient;
+}
+
 function escapeHtml(str) {
   if (!str) return '';
   const div = document.createElement('div');
@@ -70,9 +85,6 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-/**
- * Format bytes into readable string.
- */
 function formatBytes(bytes) {
   if (!bytes || bytes === 0) return '0 B';
   const k = 1024;
@@ -81,9 +93,21 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-/**
- * Validate selected files.
- */
+function getFileIcon(filename = '') {
+  const ext = filename.split('.').pop().toLowerCase();
+  if (['pdf'].includes(ext)) return '📎';
+  if (['ppt', 'pptx'].includes(ext)) return '📊';
+  if (['doc', 'docx', 'txt'].includes(ext)) return '📄';
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return '📈';
+  if (['zip', 'rar', '7z'].includes(ext)) return '🗜️';
+  return '📎';
+}
+
+function isImageFile(filename = '') {
+  const ext = filename.split('.').pop().toLowerCase();
+  return ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'svg'].includes(ext);
+}
+
 function validateFiles(fileList) {
   const files = Array.from(fileList);
   if (files.length > 10) {
@@ -94,11 +118,11 @@ function validateFiles(fileList) {
   const valid = [];
   for (const f of files) {
     if (f.size > 50 * 1024 * 1024) {
-      alert(`"${f.name}" exceeds the 50MB limit (${formatBytes(f.size)}). It has been excluded.`);
+      alert(`"${f.name}" exceeds 50MB limit.`);
       continue;
     }
     if (DANGEROUS_EXTS.test(f.name)) {
-      alert(`"${f.name}" has an unsafe file extension and cannot be uploaded.`);
+      alert(`"${f.name}" has an unsafe file extension.`);
       continue;
     }
     valid.push(f);
@@ -107,53 +131,93 @@ function validateFiles(fileList) {
 }
 
 /**
- * In-place rendering of staged files in attachment list.
+ * EXACT REFERENCE IMAGE 2 RENDERING ON MOBILE
  */
-function renderStagedList(container, listEl, countEl, filesArray, onRemove) {
+function renderStagedList(container, listEl, gridEl, filesArray, onRemove, onAdd) {
   if (filesArray.length === 0) {
     container.style.display = 'none';
     listEl.innerHTML = '';
-    countEl.textContent = '0 files';
+    if (gridEl) gridEl.innerHTML = '';
     return;
   }
 
   container.style.display = 'flex';
-  countEl.textContent = `${filesArray.length} ${filesArray.length === 1 ? 'file' : 'files'}`;
   listEl.innerHTML = '';
+  if (gridEl) gridEl.innerHTML = '';
+  let imageCount = 0;
 
   filesArray.forEach((file, idx) => {
+    const isImg = isImageFile(file.name);
     const safeName = escapeHtml(file.name);
-    const item = document.createElement('div');
-    item.className = 'mobile-attachment-item';
-    item.innerHTML = `
-      <div class="mobile-item-left">
-        <span aria-hidden="true">📄</span>
-        <span class="mobile-file-name" title="${safeName}">${safeName}</span>
-        <span class="mobile-file-size">(${formatBytes(file.size)})</span>
+
+    if (isImg && gridEl) {
+      imageCount++;
+      const thumb = document.createElement('div');
+      thumb.className = 'ref-thumb-card';
+      const imgUrl = file instanceof File ? URL.createObjectURL(file) : (file.url || '');
+      thumb.innerHTML = `
+        <img src="${imgUrl}" alt="${safeName}" class="ref-thumb-img">
+        <button class="ref-thumb-close" data-index="${idx}">✕</button>
+        <span class="ref-thumb-size">${formatBytes(file.size)}</span>
+      `;
+      gridEl.appendChild(thumb);
+    }
+
+    const pill = document.createElement('div');
+    pill.className = 'ref-pill-row';
+    const icon = getFileIcon(file.name);
+
+    pill.innerHTML = `
+      <div class="ref-pill-left">
+        <span class="ref-pill-icon">${icon}</span>
+        <span class="ref-pill-name" title="${safeName}">${safeName}</span>
       </div>
-      <button class="btn-remove-attachment" data-index="${idx}" type="button" aria-label="Remove ${safeName}">✕</button>
+      <div class="ref-pill-right">
+        <span class="ref-pill-size">${formatBytes(file.size)}</span>
+        <button class="ref-pill-remove" data-index="${idx}">✕</button>
+      </div>
     `;
-    listEl.appendChild(item);
+    listEl.appendChild(pill);
   });
 
-  listEl.querySelectorAll('.btn-remove-attachment').forEach(btn => {
+  if (gridEl) {
+    // Append '+' card matching Reference Image 2
+    const addCard = document.createElement('div');
+    addCard.className = 'ref-add-card';
+    addCard.innerHTML = '+';
+    addCard.title = 'Add more files';
+    addCard.addEventListener('click', onAdd);
+    gridEl.appendChild(addCard);
+    gridEl.style.display = 'flex';
+  }
+
+  listEl.querySelectorAll('.ref-pill-remove').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const idx = parseInt(btn.getAttribute('data-index'), 10);
       onRemove(idx);
     });
   });
+
+  if (gridEl) {
+    gridEl.querySelectorAll('.ref-thumb-close').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.getAttribute('data-index'), 10);
+        onRemove(idx);
+      });
+    });
+  }
 }
 
 /**
- * Parse URL or stored session and launch flow.
+ * Initialize companion app
  */
 function init() {
   const urlParams = new URLSearchParams(window.location.search);
   let code = urlParams.get('code');
   const action = urlParams.get('action');
 
-  // Check stored code if not in URL
   if (!code) {
     code = sessionStorage.getItem(MOBILE_CODE_KEY);
   } else {
@@ -170,7 +234,7 @@ function init() {
 }
 
 /**
- * FLOW A: Standard QR Scan Flow (Code known)
+ * FLOW A: Standard QR Scan Flow
  */
 function initStandardFlow(code) {
   currentCode = code;
@@ -191,12 +255,13 @@ function initStandardFlow(code) {
     renderStagedList(
       attachmentContainerStandard,
       attachmentListStandard,
-      standardCountBadge,
+      thumbnailGridStandard,
       stagedFilesStandard,
       (idx) => {
         stagedFilesStandard.splice(idx, 1);
         updateStandardList();
-      }
+      },
+      () => fileInputStandard.click()
     );
     btnSendStandard.disabled = stagedFilesStandard.length === 0;
     btnSendStandard.textContent = stagedFilesStandard.length > 0
@@ -210,7 +275,15 @@ function initStandardFlow(code) {
     btnSendStandard.disabled = true;
     progressStandard.style.display = 'block';
     progressFillStandard.style.width = '10%';
-    progressTextStandard.textContent = `Uploading 1 of ${stagedFilesStandard.length}...`;
+    progressTextStandard.textContent = `Connecting to storage...`;
+
+    const client = await getSupabaseClient();
+    if (!client) {
+      alert('Supabase is not configured yet. Please verify server settings.');
+      btnSendStandard.disabled = false;
+      progressStandard.style.display = 'none';
+      return;
+    }
 
     const uploaded = [];
 
@@ -219,19 +292,22 @@ function initStandardFlow(code) {
         const file = stagedFilesStandard[i];
         progressTextStandard.textContent = `Uploading ${i + 1} of ${stagedFilesStandard.length}: ${file.name}...`;
 
-        const blob = await upload(file.name, file, {
-          access: 'public',
-          handleUploadUrl: '/api/upload',
-          clientPayload: JSON.stringify({
-            code: currentCode,
-            fileName: file.name,
-            mode: 'receive',
-          }),
-        });
+        const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const storagePath = `${currentCode}/${Date.now()}_${cleanName}`;
+
+        const { data, error } = await client.storage
+          .from('documents')
+          .upload(storagePath, file, { cacheControl: '3600', upsert: true });
+
+        if (error) throw error;
+
+        const { data: publicData } = client.storage
+          .from('documents')
+          .getPublicUrl(storagePath);
 
         uploaded.push({
-          url: blob.url,
-          pathname: blob.pathname,
+          url: publicData.publicUrl,
+          storagePath: storagePath,
           name: file.name,
           size: file.size,
           contentType: file.type,
@@ -241,8 +317,9 @@ function initStandardFlow(code) {
         progressFillStandard.style.width = `${percent}%`;
       }
 
-      progressTextStandard.textContent = 'Registering with kiosk screen...';
+      progressTextStandard.textContent = 'Registering with kiosk...';
 
+      // 1. Complete upload via API
       await fetch('/api/upload-complete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -253,6 +330,19 @@ function initStandardFlow(code) {
         }),
       });
 
+      // 2. Broadcast push update to kiosk screen over Realtime WebSocket
+      try {
+        const channel = client.channel(`session:${currentCode}`);
+        await channel.subscribe();
+        channel.send({
+          type: 'broadcast',
+          event: 'files_uploaded',
+          payload: { code: currentCode, files: uploaded },
+        });
+      } catch (e) {
+        console.warn('Realtime broadcast warning:', e);
+      }
+
       progressFillStandard.style.width = '100%';
       progressTextStandard.textContent = 'Upload Complete!';
 
@@ -261,8 +351,7 @@ function initStandardFlow(code) {
         cardSuccess.classList.add('active');
       }, 400);
     } catch (err) {
-      console.error('Upload failed:', err);
-      alert(`Upload failed: ${err.message}. Please try again.`);
+      alert(`Upload failed: ${err.message}`);
       btnSendStandard.disabled = false;
       progressStandard.style.display = 'none';
     }
@@ -275,7 +364,6 @@ function initStandardFlow(code) {
 function initPreuploadFlow() {
   cardPreupload.classList.add('active');
 
-  // Check stored jobId across refresh
   const storedJob = sessionStorage.getItem(MOBILE_JOB_KEY);
   if (storedJob) {
     currentJobId = storedJob;
@@ -299,16 +387,17 @@ function initPreuploadFlow() {
     renderStagedList(
       attachmentContainerPreupload,
       attachmentListPreupload,
-      preuploadCountBadge,
+      thumbnailGridPreupload,
       stagedFilesPreupload,
       (idx) => {
         stagedFilesPreupload.splice(idx, 1);
         updatePreuploadList();
-      }
+      },
+      () => fileInputPreupload.click()
     );
     btnPreuploadFile.disabled = stagedFilesPreupload.length === 0;
     btnPreuploadFile.textContent = stagedFilesPreupload.length > 0
-      ? `Upload ${stagedFilesPreupload.length} ${stagedFilesPreupload.length === 1 ? 'File' : 'Files'}`
+      ? `Upload ${stagedFilesPreupload.length} Files`
       : 'Upload Files';
   }
 
@@ -321,6 +410,14 @@ function initPreuploadFlow() {
     currentJobId = 'job_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
     sessionStorage.setItem(MOBILE_JOB_KEY, currentJobId);
 
+    const client = await getSupabaseClient();
+    if (!client) {
+      alert('Supabase is not configured yet.');
+      btnPreuploadFile.disabled = false;
+      progressPreupload.style.display = 'none';
+      return;
+    }
+
     const uploaded = [];
 
     try {
@@ -328,18 +425,22 @@ function initPreuploadFlow() {
         const file = stagedFilesPreupload[i];
         progressTextPreupload.textContent = `Uploading ${i + 1} of ${stagedFilesPreupload.length}: ${file.name}...`;
 
-        const blob = await upload(file.name, file, {
-          access: 'public',
-          handleUploadUrl: '/api/upload',
-          clientPayload: JSON.stringify({
-            jobId: currentJobId,
-            fileName: file.name,
-          }),
-        });
+        const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const storagePath = `temp_${currentJobId}/${Date.now()}_${cleanName}`;
+
+        const { data, error } = await client.storage
+          .from('documents')
+          .upload(storagePath, file, { cacheControl: '3600', upsert: true });
+
+        if (error) throw error;
+
+        const { data: publicData } = client.storage
+          .from('documents')
+          .getPublicUrl(storagePath);
 
         uploaded.push({
-          url: blob.url,
-          pathname: blob.pathname,
+          url: publicData.publicUrl,
+          storagePath: storagePath,
           name: file.name,
           size: file.size,
           contentType: file.type,
@@ -348,8 +449,6 @@ function initPreuploadFlow() {
         const percent = Math.round(((i + 1) / stagedFilesPreupload.length) * 85);
         progressFillPreupload.style.width = `${percent}%`;
       }
-
-      progressTextPreupload.textContent = 'Saving upload record...';
 
       await fetch('/api/upload-complete', {
         method: 'POST',
@@ -371,8 +470,7 @@ function initPreuploadFlow() {
         manualCodeInput.focus();
       }, 350);
     } catch (err) {
-      console.error('Pre-upload failed:', err);
-      alert(`Upload failed: ${err.message}. Please try again.`);
+      alert(`Upload failed: ${err.message}`);
       btnPreuploadFile.disabled = false;
       progressPreupload.style.display = 'none';
     }
@@ -396,7 +494,7 @@ function initPreuploadFlow() {
 }
 
 /**
- * Camera QR Scanner via local html5-qrcode
+ * Camera Scanner
  */
 async function startCameraScanner() {
   qrScannerModal.classList.add('active');
@@ -427,34 +525,28 @@ async function startCameraScanner() {
         () => {}
       );
     } catch (err) {
-      console.error('Camera scanner error:', err);
-      alert('Unable to access camera. Please enter the 4-digit code manually.');
+      alert('Unable to access camera.');
       stopCameraScanner();
     }
   } else {
-    alert('QR scanner library unavailable. Please enter the 4-digit code manually.');
+    alert('QR scanner library unavailable.');
     stopCameraScanner();
   }
 }
 
 async function stopCameraScanner() {
   if (html5QrCodeScanner) {
-    try {
-      await html5QrCodeScanner.stop();
-    } catch (e) {}
+    try { await html5QrCodeScanner.stop(); } catch (e) {}
     html5QrCodeScanner = null;
   }
   qrScannerModal.classList.remove('active');
 }
 
-/**
- * Bind pre-uploaded job to kiosk 4-digit session code.
- */
 async function bindJobToKiosk(code) {
   if (!currentJobId) return;
 
   btnBindCode.disabled = true;
-  btnBindCode.textContent = 'Linking to screen...';
+  btnBindCode.textContent = 'Linking...';
 
   try {
     const res = await fetch('/api/bind', {
@@ -468,23 +560,19 @@ async function bindJobToKiosk(code) {
 
     if (!res.ok) {
       const err = await res.json();
-      throw new Error(err.error || `Failed to link: HTTP ${res.status}`);
+      throw new Error(err.error || `Failed HTTP ${res.status}`);
     }
 
     sessionStorage.removeItem(MOBILE_JOB_KEY);
     cardPreupload.classList.remove('active');
     cardSuccess.classList.add('active');
   } catch (err) {
-    console.error('Binding error:', err);
     alert(`Could not link to kiosk: ${err.message}`);
     btnBindCode.disabled = false;
     btnBindCode.textContent = 'Link to Kiosk Screen';
   }
 }
 
-/**
- * Helper to download cross-origin blob URL natively.
- */
 async function downloadBlobDirectly(url, filename) {
   try {
     const res = await fetch(url);
@@ -503,7 +591,7 @@ async function downloadBlobDirectly(url, filename) {
 }
 
 /**
- * FLOW C: Download Flow (Kiosk -> Mobile)
+ * FLOW C: Download Flow (Kiosk -> Phone) matching Reference Image 2
  */
 async function initDownloadFlow(code) {
   currentCode = code;
@@ -519,7 +607,6 @@ async function initDownloadFlow(code) {
       ? data.files
       : data.file ? [data.file] : [];
 
-    downloadCountBadge.textContent = `${files.length} files`;
     downloadFilesList.innerHTML = '';
 
     if (files.length === 0) {
@@ -531,14 +618,18 @@ async function initDownloadFlow(code) {
     files.forEach((file) => {
       const safeName = escapeHtml(file.name);
       const row = document.createElement('div');
-      row.className = 'mobile-attachment-item';
+      row.className = 'ref-pill-row';
+      const icon = getFileIcon(file.name);
+
       row.innerHTML = `
-        <div class="mobile-item-left">
-          <span aria-hidden="true">📥</span>
-          <span class="mobile-file-name">${safeName}</span>
-          <span class="mobile-file-size">(${formatBytes(file.size)})</span>
+        <div class="ref-pill-left">
+          <span class="ref-pill-icon">${icon}</span>
+          <span class="ref-pill-name">${safeName}</span>
         </div>
-        <button class="btn-remove-attachment btn-save-mobile" data-url="${file.url}" data-name="${safeName}" type="button" style="color:var(--accent-blue); font-size:0.8rem; font-weight:700;">Save</button>
+        <div class="ref-pill-right">
+          <span class="ref-pill-size">${formatBytes(file.size)}</span>
+          <button class="ref-pill-action btn-save-mobile" data-url="${file.url}" data-name="${safeName}" type="button" title="Save">↓</button>
+        </div>
       `;
       downloadFilesList.appendChild(row);
     });
@@ -552,13 +643,10 @@ async function initDownloadFlow(code) {
 
     btnDownloadAllMobile.addEventListener('click', () => {
       files.forEach((file, i) => {
-        setTimeout(() => {
-          downloadBlobDirectly(file.url, file.name);
-        }, i * 350);
+        setTimeout(() => downloadBlobDirectly(file.url, file.name), i * 350);
       });
     });
   } catch (err) {
-    console.error('Error fetching files for download:', err);
     downloadFilesList.innerHTML = `<div style="padding:12px; color:#e11d48; text-align:center;">${escapeHtml(err.message)}</div>`;
     btnDownloadAllMobile.style.display = 'none';
   }
