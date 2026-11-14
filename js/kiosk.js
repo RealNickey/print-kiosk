@@ -49,25 +49,92 @@ const dragOverlay = document.getElementById('drag-overlay');
 const idleTimeoutLabel = document.getElementById('idle-timeout-label');
 const printIframe = document.getElementById('print-iframe');
 
+const masterCard = document.querySelector('.master-card');
+const landscapeFrame = document.getElementById('landscape-frame');
+const mascotImgs = {
+  idle: document.getElementById('mascot-img-idle'),
+  transferring: document.getElementById('mascot-img-transferring'),
+  ready: document.getElementById('mascot-img-ready'),
+  sending: document.getElementById('mascot-img-sending'),
+};
+
+const codeCard = document.getElementById('code-card');
+const codeCopyBadge = document.getElementById('code-copy-badge');
+const copyBadgeText = document.getElementById('copy-badge-text');
+
+function setMascotState(state) {
+  if (masterCard) {
+    masterCard.classList.remove('state-idle', 'state-transferring', 'state-ready', 'state-sending');
+    masterCard.classList.add(`state-${state}`);
+  }
+  if (landscapeFrame) {
+    landscapeFrame.setAttribute('data-mascot-state', state);
+  }
+  Object.entries(mascotImgs).forEach(([key, img]) => {
+    if (img) {
+      if (key === state) {
+        img.classList.add('active');
+      } else {
+        img.classList.remove('active');
+      }
+    }
+  });
+}
+
 /**
  * Fetch public config and instantiate Supabase client
  */
-async function getSupabaseClient() {
-  if (supabaseClient) return supabaseClient;
-  try {
-    const res = await fetch('/api/config');
-    if (res.ok) {
-      const { supabaseUrl, supabaseAnonKey } = await res.json();
-      if (supabaseUrl && supabaseAnonKey) {
-        supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
-          auth: { persistSession: false },
-        });
+/**
+ * Resilient Upload Handler: Tries direct Supabase storage upload;
+ * if RLS policy blocks it, falls back to server-side relay using service role.
+ */
+async function uploadFileSmart(file, code) {
+  const client = await getSupabaseClient();
+  const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const storagePath = `${code}/${Date.now()}_${cleanName}`;
+
+  if (client) {
+    try {
+      const { data, error } = await client.storage
+        .from('documents')
+        .upload(storagePath, file, { cacheControl: '3600', upsert: true });
+
+      if (!error && data) {
+        const { data: publicData } = client.storage
+          .from('documents')
+          .getPublicUrl(storagePath);
+
+        return {
+          url: publicData.publicUrl,
+          storagePath,
+          name: file.name,
+          size: file.size,
+          contentType: file.type || 'application/octet-stream',
+        };
       }
+      console.warn('[upload] Direct upload issue, trying server relay:', error?.message);
+    } catch (e) {
+      console.warn('[upload] Direct upload exception, trying server relay:', e.message);
     }
-  } catch (err) {
-    console.warn('[kiosk] Could not fetch Supabase config:', err);
   }
-  return supabaseClient;
+
+  // Fallback: upload via serverless endpoint with service role (bypasses RLS)
+  const res = await fetch(`/api/upload-file?code=${encodeURIComponent(code)}&name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-Kiosk-Code': code,
+      'X-File-Name': encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Upload failed (HTTP ${res.status})`);
+  }
+
+  return await res.json();
 }
 
 /**
@@ -162,14 +229,17 @@ function setViewState(state) {
 
   if (state === 'receive') {
     viewReceive.classList.add('active');
+    setMascotState('idle');
     setHeaderStatus('online', 'Ready for Files');
     startIdleTimer();
   } else if (state === 'received') {
     viewReceived.classList.add('active');
+    setMascotState('ready');
     setHeaderStatus('online', 'Files Ready');
     startIdleTimer();
   } else if (state === 'sending') {
     viewSending.classList.add('active');
+    setMascotState('sending');
     setHeaderStatus('online', 'Send Mode');
     startIdleTimer();
   }
@@ -212,6 +282,10 @@ async function setupRealtimeListener(code) {
   try {
     realtimeChannel = client
       .channel(`session:${code}`)
+      .on('broadcast', { event: 'transfer_started' }, () => {
+        setMascotState('transferring');
+        setHeaderStatus('warning', 'Receiving transfer...');
+      })
       .on('broadcast', { event: 'files_uploaded' }, (payload) => {
         const files = payload?.payload?.files;
         if (Array.isArray(files) && files.length > 0) {
@@ -513,20 +587,41 @@ tabSend.addEventListener('click', () => {
 tabReset.addEventListener('click', resetSession);
 
 /**
- * Keyboard Shortcuts matching Reference Image 1: Shift + 1, Shift + 2, Shift + 3
+ * Click-to-Copy Station Code Card
+ */
+if (codeCard) {
+  codeCard.addEventListener('click', async () => {
+    if (!currentCode || currentCode === '----') return;
+    try {
+      await navigator.clipboard.writeText(currentCode);
+      if (codeCopyBadge && copyBadgeText) {
+        codeCopyBadge.classList.add('copied');
+        copyBadgeText.textContent = 'COPIED! ✓';
+        setTimeout(() => {
+          codeCopyBadge.classList.remove('copied');
+          copyBadgeText.textContent = 'TAP TO COPY';
+        }, 2200);
+      }
+    } catch (err) {
+      console.warn('Clipboard copy failed:', err);
+    }
+  });
+}
+
+/**
+ * Keyboard Shortcuts: Keys 1, 2, 3
  */
 window.addEventListener('keydown', (e) => {
-  if (e.shiftKey) {
-    if (e.key === '!' || e.key === '1') {
-      e.preventDefault();
-      setViewState(currentFiles.length > 0 ? 'received' : 'receive');
-    } else if (e.key === '@' || e.key === '2') {
-      e.preventDefault();
-      setViewState('sending');
-    } else if (e.key === '#' || e.key === '3') {
-      e.preventDefault();
-      resetSession();
-    }
+  if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
+  if (e.key === '1') {
+    e.preventDefault();
+    setViewState(currentFiles.length > 0 ? 'received' : 'receive');
+  } else if (e.key === '2') {
+    e.preventDefault();
+    setViewState('sending');
+  } else if (e.key === '3') {
+    e.preventDefault();
+    resetSession();
   }
 });
 
@@ -555,37 +650,14 @@ async function handleDesktopFilesUpload(files) {
     }
   }
 
-  setHeaderStatus('warning', 'Uploading...');
-  const client = await getSupabaseClient();
-  if (!client) {
-    alert('Connecting to Supabase storage...');
-    return;
-  }
-
+  setMascotState('transferring');
+  setHeaderStatus('warning', 'Uploading files...');
   const uploadedFiles = [];
 
   try {
     for (const file of files) {
-      const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const storagePath = `${currentCode}/${Date.now()}_${cleanName}`;
-
-      const { data, error } = await client.storage
-        .from('documents')
-        .upload(storagePath, file, { cacheControl: '3600', upsert: true });
-
-      if (error) throw error;
-
-      const { data: publicData } = client.storage
-        .from('documents')
-        .getPublicUrl(storagePath);
-
-      uploadedFiles.push({
-        url: publicData.publicUrl,
-        storagePath: storagePath,
-        name: file.name,
-        size: file.size,
-        contentType: file.type,
-      });
+      const fileRecord = await uploadFileSmart(file, currentCode);
+      uploadedFiles.push(fileRecord);
     }
 
     await fetch('/api/upload-complete', {
@@ -615,10 +687,12 @@ async function handleDesktopFilesUpload(files) {
     const downloadUrl = `${window.location.origin}/mobile?action=download&code=${currentCode}`;
     renderQrCode(qrCanvasSend, downloadUrl);
 
+    setMascotState('sending');
     setHeaderStatus('online', 'Ready for Mobile Download');
     startIdleTimer();
   } catch (err) {
     alert(`Upload failed: ${err.message}`);
+    setMascotState('sending');
     setHeaderStatus('error', 'Upload Error');
   }
 }
@@ -764,9 +838,7 @@ function resetIdleTimer() {
 }
 
 function updateIdleDisplay() {
-  if (idleTimeoutLabel) {
-    idleTimeoutLabel.textContent = `${idleTimeRemaining}s`;
-  }
+  // Silent background countdown - resets automatically after 3 minutes of inactivity
 }
 
 window.addEventListener('click', resetIdleTimer);

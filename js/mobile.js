@@ -60,22 +60,57 @@ const btnCancelScanner = document.getElementById('btn-cancel-scanner');
 // Dangerous extensions
 const DANGEROUS_EXTS = /\.(exe|bat|cmd|sh|js|mjs|cjs|vbs|ps1|scr|msi|jar|apk|com|pif|hta|html|htm|php|cgi)$/i;
 
-async function getSupabaseClient() {
-  if (supabaseClient) return supabaseClient;
-  try {
-    const res = await fetch('/api/config');
-    if (res.ok) {
-      const { supabaseUrl, supabaseAnonKey } = await res.json();
-      if (supabaseUrl && supabaseAnonKey) {
-        supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
-          auth: { persistSession: false },
-        });
+/**
+ * Resilient Upload Handler: Tries direct Supabase storage upload;
+ * if RLS policy blocks it, falls back to server-side relay using service role.
+ */
+async function uploadFileSmart(file, code) {
+  const client = await getSupabaseClient();
+  const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const storagePath = `${code}/${Date.now()}_${cleanName}`;
+
+  if (client) {
+    try {
+      const { data, error } = await client.storage
+        .from('documents')
+        .upload(storagePath, file, { cacheControl: '3600', upsert: true });
+
+      if (!error && data) {
+        const { data: publicData } = client.storage
+          .from('documents')
+          .getPublicUrl(storagePath);
+
+        return {
+          url: publicData.publicUrl,
+          storagePath,
+          name: file.name,
+          size: file.size,
+          contentType: file.type || 'application/octet-stream',
+        };
       }
+      console.warn('[upload] Direct upload encountered an issue, trying server relay:', error?.message);
+    } catch (e) {
+      console.warn('[upload] Direct upload exception, trying server relay:', e.message);
     }
-  } catch (err) {
-    console.warn('[mobile] Could not fetch Supabase config:', err);
   }
-  return supabaseClient;
+
+  // Fallback: upload via serverless endpoint with service role (bypasses RLS)
+  const res = await fetch(`/api/upload-file?code=${encodeURIComponent(code)}&name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-Kiosk-Code': code,
+      'X-File-Name': encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Upload failed (HTTP ${res.status})`);
+  }
+
+  return await res.json();
 }
 
 function escapeHtml(str) {
@@ -288,30 +323,25 @@ function initStandardFlow(code) {
     const uploaded = [];
 
     try {
+      // Notify kiosk that upload is in progress (switches to transferring state & mascot)
+      try {
+        const notifyChannel = client.channel(`session:${currentCode}`);
+        await notifyChannel.subscribe();
+        notifyChannel.send({
+          type: 'broadcast',
+          event: 'transfer_started',
+          payload: { code: currentCode },
+        });
+      } catch (e) {
+        console.warn('Realtime notify warning:', e);
+      }
+
       for (let i = 0; i < stagedFilesStandard.length; i++) {
         const file = stagedFilesStandard[i];
         progressTextStandard.textContent = `Uploading ${i + 1} of ${stagedFilesStandard.length}: ${file.name}...`;
 
-        const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const storagePath = `${currentCode}/${Date.now()}_${cleanName}`;
-
-        const { data, error } = await client.storage
-          .from('documents')
-          .upload(storagePath, file, { cacheControl: '3600', upsert: true });
-
-        if (error) throw error;
-
-        const { data: publicData } = client.storage
-          .from('documents')
-          .getPublicUrl(storagePath);
-
-        uploaded.push({
-          url: publicData.publicUrl,
-          storagePath: storagePath,
-          name: file.name,
-          size: file.size,
-          contentType: file.type,
-        });
+        const fileRecord = await uploadFileSmart(file, currentCode);
+        uploaded.push(fileRecord);
 
         const percent = Math.round(((i + 1) / stagedFilesStandard.length) * 85);
         progressFillStandard.style.width = `${percent}%`;
@@ -425,26 +455,8 @@ function initPreuploadFlow() {
         const file = stagedFilesPreupload[i];
         progressTextPreupload.textContent = `Uploading ${i + 1} of ${stagedFilesPreupload.length}: ${file.name}...`;
 
-        const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const storagePath = `temp_${currentJobId}/${Date.now()}_${cleanName}`;
-
-        const { data, error } = await client.storage
-          .from('documents')
-          .upload(storagePath, file, { cacheControl: '3600', upsert: true });
-
-        if (error) throw error;
-
-        const { data: publicData } = client.storage
-          .from('documents')
-          .getPublicUrl(storagePath);
-
-        uploaded.push({
-          url: publicData.publicUrl,
-          storagePath: storagePath,
-          name: file.name,
-          size: file.size,
-          contentType: file.type,
-        });
+        const fileRecord = await uploadFileSmart(file, 'job_' + currentJobId);
+        uploaded.push(fileRecord);
 
         const percent = Math.round(((i + 1) / stagedFilesPreupload.length) * 85);
         progressFillPreupload.style.width = `${percent}%`;

@@ -7,10 +7,10 @@
   <link rel="manifest" href="/manifest.json">
   <title>Print Station</title>
   
-  <!-- Premium Modern Fonts: Plus Jakarta Sans for UI & JetBrains Mono for Code / Station Code -->
+  <!-- Premium Modern Fonts: Plus Jakarta Sans (UI), Space Grotesk (Fancy Station Code), JetBrains Mono (Code/Sizes) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@700;800&display=swap" rel="stylesheet">
   
   <link rel="stylesheet" href="/css/kiosk.css">
   <!-- Bundled offline-resilient QR Code generator -->
@@ -21,24 +21,24 @@
   <!-- Main Viewport Enclosure (Strictly 100vh / No Scroll) -->
   <div class="kiosk-canvas-wrapper">
 
-    <!-- 1:1 Centered Master Card matching Reference Image 1 -->
-    <div class="master-card" id="master-card">
+    <!-- 1:1 Centered Master Card matching Reference Image 1 with Dynamic State Styling -->
+    <div class="master-card state-idle" id="master-card">
 
       <!-- LEFT COLUMN: Navigation Tabs, Handshake & Exact Ref 2 Attachments -->
       <div class="left-panel">
 
-        <!-- Shift+1, Shift+2, Shift+3 Tabs matching Reference Image 1 -->
+        <!-- 1, 2, 3 Tabs matching Reference Image 1 -->
         <nav class="ref-tabs" role="tablist" aria-label="Station Navigation">
           <button class="ref-tab active" id="tab-receive" role="tab" aria-selected="true" type="button">
-            <span class="ref-tab-kbd">Shift + 1</span>
+            <span class="ref-tab-kbd">1</span>
             <span class="ref-tab-name">Receive</span>
           </button>
           <button class="ref-tab" id="tab-send" role="tab" aria-selected="false" type="button">
-            <span class="ref-tab-kbd">Shift + 2</span>
+            <span class="ref-tab-kbd">2</span>
             <span class="ref-tab-name">Send</span>
           </button>
-          <button class="ref-tab" id="tab-reset" role="tab" aria-selected="false" type="button" title="New Station Code (Shift + 3)">
-            <span class="ref-tab-kbd">Shift + 3</span>
+          <button class="ref-tab" id="tab-reset" role="tab" aria-selected="false" type="button" title="New Station Code (Key 3)">
+            <span class="ref-tab-kbd">3</span>
             <span class="ref-tab-name">New Code</span>
           </button>
         </nav>
@@ -46,29 +46,50 @@
         <!-- Dynamic Content Body -->
         <div class="panel-body">
 
-          <!-- VIEW 1: Default Receive Screen (QR Code, Station Code, and Reference Dropzone) -->
+          <!-- VIEW 1: Default Receive Screen (QR Code, Big Space Grotesk Station Code, Taller Minimal Dropzone) -->
           <div class="station-view active" id="view-receive">
             <div class="station-header">
               <h1 class="ref-heading">Receive</h1>
               <p class="ref-subheading">Scan QR or enter station code on mobile</p>
             </div>
 
-            <!-- Code & QR Handshake Box -->
+            <!-- Handshake Row: Big Display Font Code Box + QR Code -->
             <div class="handshake-row">
-              <div class="ref-code-card">
-                <span class="ref-code-label">STATION CODE</span>
-                <span class="ref-code-value" id="display-code">----</span>
+              <div class="ref-code-card" id="code-card" role="button" tabindex="0" title="Click to copy station code" aria-label="Station PIN code">
+                <div class="ref-code-top">
+                  <div class="ref-code-badge-group">
+                    <span class="ref-code-label">STATION PIN</span>
+                    <span class="ref-code-pulse-dot" aria-hidden="true"></span>
+                  </div>
+                  <button class="ref-code-badge" id="code-copy-badge" type="button" aria-label="Copy station code">
+                    <svg class="copy-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    <span id="copy-badge-text">TAP TO COPY</span>
+                  </button>
+                </div>
+                <div class="ref-code-display-wrap">
+                  <div class="ref-code-value" id="display-code">----</div>
+                </div>
+                <div class="ref-code-bottom">
+                  <span class="ref-code-hint">DIRECT 4-DIGIT PIN • TAP TO COPY</span>
+                </div>
               </div>
               <div class="qr-wrapper">
                 <canvas id="qr-canvas-receive" width="160" height="160" aria-label="Station QR Code"></canvas>
               </div>
             </div>
 
-            <!-- Exact Reference Image 2 Dropzone (Triggers Send Mode on drop/click) -->
-            <div class="ref-upload-outer" id="btn-trigger-send-mode">
+            <!-- Minimal, Taller Dropzone with Upload Icon -->
+            <div class="ref-upload-outer" id="btn-trigger-send-mode" role="button" tabindex="0" aria-label="Drop files or browse">
               <div class="ref-upload-dashed">
-                <div class="ref-upload-title">Drag and drop files here or click to browse.</div>
-                <div class="ref-upload-sub">Maximum 50MB File Size</div>
+                <div class="ref-upload-icon-box">
+                  <svg class="ref-upload-svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                </div>
+                <div class="ref-upload-title">Drop files here or click to browse</div>
+                <div class="ref-upload-sub">Up to 50MB per file</div>
               </div>
             </div>
           </div>
@@ -110,11 +131,18 @@
 
             <input type="file" id="desktop-file-input" multiple style="display: none;">
 
-            <!-- Exact Reference Upload Dropzone Box -->
+            <!-- Minimal, Taller Upload Dropzone -->
             <div class="ref-upload-outer">
-              <div class="ref-upload-dashed" id="desktop-dropzone" role="button" tabindex="0">
-                <div class="ref-upload-title">Drag and drop files here or click to browse.</div>
-                <div class="ref-upload-sub">Maximum 50MB File Size</div>
+              <div class="ref-upload-dashed" id="desktop-dropzone" role="button" tabindex="0" aria-label="Drop files or browse">
+                <div class="ref-upload-icon-box">
+                  <svg class="ref-upload-svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                </div>
+                <div class="ref-upload-title">Drop files here or click to browse</div>
+                <div class="ref-upload-sub">Up to 50MB per file</div>
               </div>
             </div>
 
@@ -136,23 +164,23 @@
 
         </div>
 
-        <!-- Bottom Footer Info: Minimal Status & 180s Countdown Bar -->
+        <!-- Bottom Footer Info: Minimal Status Indicator (Timer runs in background) -->
         <footer class="panel-footer">
           <div class="status-indicator">
             <span class="status-dot online" id="status-dot"></span>
             <span id="status-label">Synchronized</span>
           </div>
-          <div class="timeout-pill" id="idle-timeout-pill">
-            <span id="idle-timeout-label">180s</span>
-          </div>
         </footer>
 
       </div>
 
-      <!-- RIGHT COLUMN: Pristine Landscape Rectangle (Reference Image 1, NO text on top) -->
+      <!-- RIGHT COLUMN: Pristine Landscape Rectangle with State-Morphing Mascot -->
       <div class="right-panel">
-        <div class="landscape-frame">
-          <img src="/assets/hero-landscape.jpg" alt="Serene rolling green hills landscape" class="landscape-img" loading="eager">
+        <div class="landscape-frame" id="landscape-frame" data-mascot-state="idle">
+          <img src="/assets/hero-mascot-idle.jpg" id="mascot-img-idle" alt="Kiosk mascot resting peacefully on grassy meadow" class="landscape-img mascot-img active" loading="eager">
+          <img src="/assets/hero-mascot-transferring.jpg" id="mascot-img-transferring" alt="Kiosk mascot joyfully carrying document in golden sunlight" class="landscape-img mascot-img" loading="eager">
+          <img src="/assets/hero-mascot-ready.jpg" id="mascot-img-ready" alt="Kiosk mascot happily holding yellow flowers in celebration" class="landscape-img mascot-img" loading="eager">
+          <img src="/assets/hero-mascot-sending.jpg" id="mascot-img-sending" alt="Kiosk mascot watching paper airplane fly into the sky" class="landscape-img mascot-img" loading="eager">
         </div>
       </div>
 
